@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">ContactKiller</title>
+  <desc id="description">Your address books disagree. ContactKiller shows its work.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" x2="1">
+      <stop stop-color="#EEE0CC"/>
+      <stop offset="1" stop-color="#D9C6AF"/>
+    </linearGradient>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse">
+      <path d="M56 0H0V56" fill="none" stroke="#5C4831" stroke-opacity=".16"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="#0C0D0E"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <path d="M0 64h1200" stroke="#5C4831"/>
+  <circle cx="36" cy="64" r="5" fill="#0C0D0E" stroke="#B2A28D"/>
+  <circle cx="1164" cy="64" r="5" fill="#0C0D0E" stroke="#B2A28D"/>
+  <text x="62" y="43" fill="#D9C6AF" font-family="Georgia,serif" font-size="25">ContactKiller</text>
+  <text x="62" y="188" fill="#D9C6AF" font-family="Georgia,serif" font-size="68">Your address books</text>
+  <text x="62" y="266" fill="#D9C6AF" font-family="Georgia,serif" font-size="68">disagree.</text>
+  <text x="62" y="344" fill="#E2462D" font-family="Georgia,serif" font-size="68">ContactKiller</text>
+  <text x="62" y="422" fill="#D9C6AF" font-family="Georgia,serif" font-size="68">shows its work.</text>
+  <text x="66" y="490" fill="#B2A28D" font-family="monospace" font-size="16" letter-spacing="2">OPEN-SOURCE CONTACT RECONCILIATION</text>
+  <rect x="700" y="112" width="434" height="410" rx="5" fill="#171717" stroke="#5C4831"/>
+  <rect x="733" y="154" width="120" height="54" fill="#111" stroke="#B2A28D"/>
+  <rect x="733" y="231" width="120" height="54" fill="#111" stroke="#B2A28D"/>
+  <rect x="733" y="308" width="120" height="54" fill="#111" stroke="#B2A28D"/>
+  <rect x="733" y="385" width="120" height="54" fill="#111" stroke="#B2A28D"/>
+  <path d="M853 181C910 181 897 241 936 241M853 258c72 0 23 40 83 40M853 335c53 0 31-4 83-4M853 412c72 0 13-27 83-27" fill="none" stroke="#A93A26" stroke-width="8"/>
+  <rect x="924" y="197" width="126" height="232" fill="url(#paper)" stroke="#B2A28D" stroke-width="4"/>
+  <text x="944" y="241" fill="#45680F" font-family="monospace" font-size="18" letter-spacing="2">MAYA CHEN</text>
+  <text x="944" y="268" fill="#5C4831" font-family="monospace" font-size="10">SYNTHETIC PERSON</text>
+  <path d="M944 300h85M944 326h85M944 352h85" stroke="#B2A28D"/>
+  <rect x="1066" y="216" width="42" height="194" fill="#A93A26" stroke="#B2A28D"/>
+  <rect x="1056" y="294" width="62" height="55" fill="#5C4831" stroke="#B2A28D"/>
+  <path d="M1080 313v-8a7 7 0 0114 0v8m-18 0h22v23h-22z" fill="none" stroke="#D9C6AF" stroke-width="2"/>
+  <text x="700" y="563" fill="#B2A28D" font-family="monospace" font-size="15" letter-spacing="1">RECONCILIATION, NOT SYNCHRONIZATION.</text>
+</svg>

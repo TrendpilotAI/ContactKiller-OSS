@@ -1,0 +1,11 @@
+ContactKiller ActiveGraph pack
+Copyright 2026 ContactKiller contributors
+
+This package depends on Active Graph, distributed under the Apache License,
+Version 2.0.
+
+Active Graph
+Copyright 2026 Yohei Nakajima
+
+See https://github.com/TrendpilotAI/ContactKiller-OSS/blob/main/THIRD_PARTY_NOTICES.md
+for the project-level dependency-license boundaries.

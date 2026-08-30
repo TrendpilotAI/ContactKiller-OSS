@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "fixture": true,
+  "notice": "All identities and events in this file are synthetic.",
+  "observations": [
+    {
+      "source": "icloud",
+      "accountAlias": "personal-icloud",
+      "sourceRecordId": "synthetic-icloud-001",
+      "capturedAt": "2026-01-05T09:30:00Z",
+      "name": "Maya Chen",
+      "emails": ["maya.chen@example.com"],
+      "phones": ["+1 202-555-0147"],
+      "labels": ["friends"]
+    },
+    {
+      "source": "google",
+      "accountAlias": "personal-google",
+      "sourceRecordId": "synthetic-google-personal-001",
+      "capturedAt": "2026-01-07T14:15:00Z",
+      "name": "Maya L. Chen",
+      "emails": ["maya.chen@example.com"],
+      "phones": [],
+      "labels": []
+    },
+    {
+      "source": "google",
+      "accountAlias": "work-google",
+      "sourceRecordId": "synthetic-google-work-001",
+      "capturedAt": "2025-11-20T17:40:00Z",
+      "name": "Maya Chen",
+      "emails": ["mchen@example.org"],
+      "phones": ["2025550147"],
+      "labels": ["legacy-import"]
+    },
+    {
+      "source": "crm",
+      "accountAlias": "example-crm",
+      "sourceRecordId": "synthetic-crm-001",
+      "capturedAt": "2025-08-12T11:05:00Z",
+      "name": "Maya Chen",
+      "emails": ["mchen@example.org"],
+      "phones": [],
+      "labels": ["lead", "wealth-management"]
+    },
+    {
+      "source": "whatsapp-evidence",
+      "accountAlias": "personal-phone",
+      "sourceRecordId": "synthetic-whatsapp-001",
+      "capturedAt": "2026-01-08T19:22:00Z",
+      "name": null,
+      "emails": [],
+      "phones": ["+12025550147"],
+      "labels": ["number-only"]
+    }
+  ],
+  "expectedProposal": {
+    "canonicalDisplayName": "Maya Chen",
+    "canonicalEmails": ["maya.chen@example.com", "mchen@example.org"],
+    "canonicalPhones": ["+12025550147"],
+    "status": "proposed",
+    "automaticProviderWrite": false,
+    "reason": "Exact canonical email and E.164 phone links connect the observations; account boundaries and legacy labels remain preserved."
+  }
+}

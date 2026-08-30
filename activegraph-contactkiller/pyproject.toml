@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "activegraph-contactkiller"
+version = "0.1.0"
+description = "Event-sourced ActiveGraph pack for ContactKiller contact reconciliation"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE*", "NOTICE"]
+authors = [{ name = "ContactKiller contributors" }]
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Groupware",
+]
+dependencies = [
+  "activegraph==1.10.0",
+  "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=9.0.3,<10"]
+postgres = ["activegraph[postgres]==1.10.0"]
+
+[project.urls]
+Homepage = "https://github.com/TrendpilotAI/ContactKiller-OSS"
+Documentation = "https://github.com/TrendpilotAI/ContactKiller-OSS/tree/main/docs"
+Repository = "https://github.com/TrendpilotAI/ContactKiller-OSS.git"
+Issues = "https://github.com/TrendpilotAI/ContactKiller-OSS/issues"
+
+[project.entry-points."activegraph.packs"]
+contactkiller = "activegraph_contactkiller:pack"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

@@ -1,0 +1,10 @@
+.next/
+node_modules/
+out/
+tsconfig.tsbuildinfo
+.vercel/
+.env*
+!.env.example
+/AGENTS.md
+/CLAUDE.md
+.vercel

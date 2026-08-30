@@ -1,0 +1,45 @@
+name: Provider adapter proposal
+description: Design a new read-only source adapter before implementation.
+title: "adapter: "
+labels: ["adapter", "proposal"]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+    validations:
+      required: true
+  - type: textarea
+    id: auth
+    attributes:
+      label: Authentication and least-privilege scopes
+    validations:
+      required: true
+  - type: textarea
+    id: paging
+    attributes:
+      label: Pagination, stable IDs, and partial failures
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Source evidence and provenance
+      description: What exact payload, hash, timestamps, and account ownership can be preserved?
+    validations:
+      required: true
+  - type: textarea
+    id: fixtures
+    attributes:
+      label: Synthetic fixture plan
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: First contribution boundary
+      options:
+        - label: The initial adapter will be read-only.
+          required: true
+        - label: No real provider data will be committed or attached.
+          required: true

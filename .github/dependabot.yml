@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: bun
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: bun
+    directory: /website
+    schedule:
+      interval: weekly
+    groups:
+      website-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: pip
+    directory: /activegraph-contactkiller
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

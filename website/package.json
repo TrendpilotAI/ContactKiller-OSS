@@ -1,0 +1,31 @@
+{
+  "name": "contactkiller-website",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The open-source launch site for ContactKiller.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "16.3.3",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "packageManager": "bun@1.4.0"
+}

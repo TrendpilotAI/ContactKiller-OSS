@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible problem using synthetic data only.
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Do not include real contacts, credentials, messages, screenshots, or provider payloads. Security issues belong in a private advisory.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This report contains synthetic data only.
+          required: true
+        - label: I removed tokens, cookies, account IDs, and private logs.
+          required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Affected commit or version
+      placeholder: e.g. 1a2b3c4 or 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Synthetic reproduction
+      description: Provide the smallest synthetic fixture and command sequence that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Web prototype
+        - Source ingestion
+        - ActiveGraph pack
+        - SurrealDB integration
+        - Documentation or website
+        - Other
+    validations:
+      required: true

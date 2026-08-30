@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused improvement or extension.
+title: "proposal: "
+labels: ["proposal", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Keep proposals evidence-first and use synthetic examples only.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or contributor problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Data-safety and provenance impact
+      description: Explain whether this affects identity rules, source evidence, tenants, credentials, or external writes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

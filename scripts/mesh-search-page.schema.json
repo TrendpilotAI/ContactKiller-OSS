@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tool", "capturedAt", "contacts"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "tool": { "type": "string", "const": "mcp__mesh__searchContacts" },
+    "capturedAt": { "type": "string" },
+    "contacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceRecordId", "entityType", "sourceUpdatedAt", "payloadJson", "emails", "phones", "names"],
+        "properties": {
+          "sourceRecordId": { "type": "string" },
+          "entityType": { "type": "string", "const": "contact" },
+          "sourceUpdatedAt": { "type": ["string", "null"] },
+          "payloadJson": { "type": "string" },
+          "emails": { "type": "array", "items": { "type": "string" } },
+          "phones": { "type": "array", "items": { "type": "string" } },
+          "names": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

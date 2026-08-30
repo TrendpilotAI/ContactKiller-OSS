@@ -1,0 +1,10 @@
+{
+  "kind": "deterministic-render",
+  "source": "website/public/og.svg",
+  "output": "website/public/og.png",
+  "dimensions": "1200x630",
+  "generator": "librsvg rsvg-convert",
+  "command": "XDG_CACHE_HOME=/private/tmp/contactkiller-font-cache rsvg-convert --width 1200 --height 630 website/public/og.svg --output website/public/og.png",
+  "aiGenerated": false,
+  "containsRealContactData": false
+}

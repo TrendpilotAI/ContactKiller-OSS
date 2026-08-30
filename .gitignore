@@ -1,0 +1,195 @@
+# ContactKiller - .gitignore
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# API Keys & Secrets
+secrets/
+*.key
+*.pem
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+credentials.json
+client_secret.json
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.duckdb
+*.duckdb.wal
+*.parquet
+/prisma/*.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+.yarn/
+.yarn-integrity
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+.turbo/
+.vercel/
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.project
+.classpath
+.settings/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# iOS / Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcworkspace/contents.xcworkspacedata
+/*.gcno
+**/xcshareddata/WorkspaceSettings.xcsettings
+xcuserdata/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj
+
+# CocoaPods
+Pods/
+*.podspec
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*~.nib
+.lock-wscript
+
+# OS-specific
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# Backup files
+*.backup
+*.old
+*.orig
+
+# Contact data exports (privacy)
+exports/
+backups/
+contacts_export_*.vcf
+contacts_export_*.csv
+*.ndjson
+*.jsonl
+
+# Local connector credentials and MCP output
+.mcp.json
+
+# Agent workspaces and private session state
+.claude/
+.claude-flow/
+.codex/
+.swarm/
+.worktrees/
+history.txt
+
+# Public-release excluded research and audit artifacts
+research/
+contact-audit-site/
+*.har
+*.mhtml
+*.webarchive
+
+# Design decision/review artifacts are local working evidence
+.impeccable/
+
+# Generated or authenticated research captures. Commit only curated findings.
+research/**/01-public-site/raw/
+research/**/01-public-site/screenshots/
+research/**/02-authenticated-product/
+research/**/03-docs-api-mcp/crawl/
+research/**/03-docs-api-mcp/download/
+research/**/04-reviews/**/raw/
+research/**/04-reviews/**/pages/
+
+# Local development
+.local/
+.dev/
+dev-data/
+**/supabase/.temp/
+
+# TypeScript
+*.tsbuildinfo
+
+# Production artifacts
+.serverless/
+.fusebox/
+.dynamodb/
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+
+# Misc
+.npmrc
+.yarnrc
+.tern-port

@@ -1,0 +1,10 @@
+BEGIN:VCARD
+VERSION:3.0
+FN:Maya Chen
+N:Chen;Maya;;;
+EMAIL;TYPE=INTERNET;TYPE=HOME:maya.chen@example.com
+TEL;TYPE=CELL:+12025550147
+X-CONTACTKILLER-SYNTHETIC:TRUE
+NOTE:Synthetic ContactKiller fixture. Not a real person.
+UID:synthetic-icloud-maya-chen-001
+END:VCARD
