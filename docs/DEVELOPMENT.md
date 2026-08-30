@@ -20,6 +20,8 @@ bun install
 bun run dev
 ```
 
+Use this public repository for development; the private internal archive is not a contributor source.
+
 The command above starts the interface but does not provision its backend. For a disposable development environment:
 
 1. Apply `web/supabase/migrations/001_initial_schema.sql` and then `002_security_and_oauth.sql` to a development Supabase project.
