@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
-import { createClient } from '@/lib/supabase/server'
-
-// Google OAuth configuration
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!
-const GOOGLE_REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`
+import { getEncryptionKey } from '@/lib/db/crypto'
+import { saveOAuthToken } from '@/lib/db/oauth-tokens'
+import { openSession } from '@/lib/db/session'
 
 // GET /api/auth/google/callback - Handles OAuth callback from Google
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL!
   const cookieStore = await cookies()
   const searchParams = request.nextUrl.searchParams
 
@@ -17,36 +15,37 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const state = searchParams.get('state')
   const error = searchParams.get('error')
 
-  // Get stored state and user ID
+  // Get stored state
   const storedState = cookieStore.get('google_oauth_state')?.value
-  const userId = cookieStore.get('google_oauth_user')?.value
 
-  // Clear OAuth cookies immediately
+  // Clear OAuth cookie immediately
   cookieStore.delete('google_oauth_state')
-  cookieStore.delete('google_oauth_user')
 
   // Handle OAuth errors from Google
   if (error) {
     console.error('Google OAuth error:', error)
     return NextResponse.redirect(
-      new URL(`/settings?error=${encodeURIComponent(error)}`, process.env.NEXT_PUBLIC_APP_URL!)
+      new URL(`/settings?error=${encodeURIComponent(error)}`, appUrl)
     )
   }
 
   // Validate state (CSRF protection)
   if (!storedState || !state || storedState !== state) {
     console.error('Invalid OAuth state')
-    return NextResponse.redirect(
-      new URL('/settings?error=invalid_state', process.env.NEXT_PUBLIC_APP_URL!)
-    )
+    return NextResponse.redirect(new URL('/settings?error=invalid_state', appUrl))
   }
 
-  // Validate we have code and user ID
-  if (!code || !userId) {
-    console.error('Missing code or user ID')
-    return NextResponse.redirect(
-      new URL('/settings?error=missing_params', process.env.NEXT_PUBLIC_APP_URL!)
-    )
+  // The tokens belong to whoever holds the session, never to a user id
+  // supplied by the browser.
+  const session = await openSession()
+  if (!session) {
+    return NextResponse.redirect(new URL('/login?next=/settings', appUrl))
+  }
+
+  if (!code) {
+    await session.close()
+    console.error('Missing code')
+    return NextResponse.redirect(new URL('/settings?error=missing_params', appUrl))
   }
 
   try {
@@ -56,9 +55,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         code,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: GOOGLE_REDIRECT_URI,
+        client_id: process.env.GOOGLE_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+        redirect_uri: `${appUrl}/api/auth/google/callback`,
         grant_type: 'authorization_code',
       }),
     })
@@ -66,43 +65,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (!tokenResponse.ok) {
       const errorData = await tokenResponse.text()
       console.error('Token exchange failed:', errorData)
-      return NextResponse.redirect(
-        new URL('/settings?error=token_exchange_failed', process.env.NEXT_PUBLIC_APP_URL!)
-      )
+      return NextResponse.redirect(new URL('/settings?error=token_exchange_failed', appUrl))
     }
 
     const tokens = await tokenResponse.json()
 
-    // Store tokens in Supabase (RLS protected)
-    const supabase = await createClient()
-    const { error: upsertError } = await supabase
-      .from('oauth_tokens')
-      .upsert({
-        user_id: userId,
-        provider: 'google',
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token || null,
-        expires_at: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
-      }, {
-        onConflict: 'user_id,provider',
+    // Store tokens in SurrealDB, encrypted, scoped to the session user
+    try {
+      await saveOAuthToken(session.db, getEncryptionKey(), session.userId, 'google', {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token || null,
+        expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
       })
-
-    if (upsertError) {
-      console.error('Failed to store tokens:', upsertError)
-      return NextResponse.redirect(
-        new URL('/settings?error=storage_failed', process.env.NEXT_PUBLIC_APP_URL!)
-      )
+    } catch (storeError) {
+      console.error('Failed to store tokens:', storeError)
+      return NextResponse.redirect(new URL('/settings?error=storage_failed', appUrl))
     }
 
     // Success - redirect to settings with success message
-    return NextResponse.redirect(
-      new URL('/settings?google=connected', process.env.NEXT_PUBLIC_APP_URL!)
-    )
-
+    return NextResponse.redirect(new URL('/settings?google=connected', appUrl))
   } catch (err) {
     console.error('OAuth callback error:', err)
-    return NextResponse.redirect(
-      new URL('/settings?error=callback_failed', process.env.NEXT_PUBLIC_APP_URL!)
-    )
+    return NextResponse.redirect(new URL('/settings?error=callback_failed', appUrl))
+  } finally {
+    await session.close()
   }
 }

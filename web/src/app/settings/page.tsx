@@ -64,6 +64,10 @@ function SettingsContent() {
   async function checkGoogleStatus() {
     try {
       const res = await fetch('/api/sync/google')
+      if (res.status === 401) {
+        window.location.assign('/login?next=/settings')
+        return
+      }
       if (res.ok) {
         const data = await res.json()
         setGoogleStatus(data)

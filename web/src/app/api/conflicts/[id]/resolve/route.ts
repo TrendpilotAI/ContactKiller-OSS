@@ -1,6 +1,8 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { redirect } from 'next/navigation'
+import { InvalidRecordKeyError } from '@/lib/db/client'
+import { isChoice, resolveConflict } from '@/lib/db/conflicts'
+import { openSession, unauthorizedResponse } from '@/lib/db/session'
 
 // POST /api/conflicts/:id/resolve - Resolve a conflict
 export async function POST(
@@ -8,67 +10,46 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const supabase = await createClient()
 
   const formData = await request.formData()
-  const choice = formData.get('choice') as string
+  const choice = formData.get('choice')
 
-  if (!choice || !['a', 'b', 'skip'].includes(choice)) {
+  if (!isChoice(choice)) {
     return NextResponse.json(
       { error: 'Invalid choice. Must be "a", "b", or "skip"' },
       { status: 400 }
     )
   }
 
-  // Get the conflict
-  const { data: conflict, error: fetchError } = await supabase
-    .from('conflicts')
-    .select('*')
-    .eq('id', id)
-    .single()
+  const session = await openSession()
+  if (!session) return unauthorizedResponse()
 
-  if (fetchError || !conflict) {
-    return NextResponse.json({ error: 'Conflict not found' }, { status: 404 })
+  let outcome
+  try {
+    outcome = await resolveConflict(session.db, id, choice)
+  } catch (error) {
+    if (!(error instanceof InvalidRecordKeyError)) throw error
+    outcome = { status: 'not_found' as const }
+  } finally {
+    await session.close()
   }
 
-  if (choice === 'skip') {
-    // Just mark as resolved without applying
-    const { error } = await supabase
-      .from('conflicts')
-      .update({ resolved: true })
-      .eq('id', id)
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
-    }
-  } else {
-    // Apply the chosen value
-    const valueToApply = choice === 'a' ? conflict.value_a : conflict.value_b
-
-    // Update the contact field based on conflict.field
-    const updateData: Record<string, string | null> = {}
-    updateData[conflict.field] = valueToApply
-
-    const { error: updateError } = await supabase
-      .from('contacts')
-      .update(updateData)
-      .eq('id', conflict.contact_id)
-
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 })
-    }
-
-    // Mark conflict as resolved
-    const { error } = await supabase
-      .from('conflicts')
-      .update({ resolved: true })
-      .eq('id', id)
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+  switch (outcome.status) {
+    case 'resolved':
+      // Redirect back to conflicts page
+      redirect('/conflicts')
+    case 'not_found':
+      return NextResponse.json({ error: 'Conflict not found' }, { status: 404 })
+    case 'already_resolved':
+      return NextResponse.json({ error: 'Conflict is already resolved' }, { status: 409 })
+    case 'unsupported_field':
+      return NextResponse.json(
+        { error: `Conflicts on "${outcome.field}" cannot be applied automatically. Choose skip.` },
+        { status: 422 }
+      )
+    default: {
+      const unreachable: never = outcome
+      return unreachable
     }
   }
-
-  // Redirect back to conflicts page
-  redirect('/conflicts')
 }

@@ -1,5 +1,7 @@
 import { google, people_v1 } from 'googleapis'
-import { SupabaseClient } from '@supabase/supabase-js'
+import type { RecordId } from 'surrealdb'
+import type { Db } from '@/lib/db/client'
+import { createContact, loadIdentityIndex, updateImportedContact } from '@/lib/db/contacts'
 import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
 import { parsePhoneNumber } from 'libphonenumber-js'
 
@@ -44,7 +46,7 @@ export async function fetchGoogleContacts(
 }
 
 // Normalize phone number for consistent matching
-function normalizePhone(phone: string): string | null {
+export function normalizePhone(phone: string): string | null {
   try {
     // Try to parse as US number first, then international
     const parsed = parsePhoneNumber(phone, 'US')
@@ -61,11 +63,19 @@ function normalizePhone(phone: string): string | null {
   return null
 }
 
-// Sync Google contacts to local database
+// Sync Google contacts into SurrealDB for one user
 export async function syncGoogleContacts(
-  supabase: SupabaseClient,
-  userId: string,
+  db: Db,
+  userId: RecordId,
   accessToken: string
+): Promise<SyncResult> {
+  return reconcileGoogleContacts(db, userId, await fetchGoogleContacts(accessToken))
+}
+
+export async function reconcileGoogleContacts(
+  db: Db,
+  userId: RecordId,
+  googleContacts: people_v1.Schema$Person[]
 ): Promise<SyncResult> {
   const result: SyncResult = {
     imported: 0,
@@ -74,45 +84,15 @@ export async function syncGoogleContacts(
     errors: [],
   }
 
-  // Fetch all Google contacts
-  const googleContacts = await fetchGoogleContacts(accessToken)
-
-  // Get all existing contacts with emails for this user
-  const { data: existingContacts } = await supabase
-    .from('contacts')
-    .select(`
-      id,
-      display_name,
-      first_name,
-      last_name,
-      emails (email),
-      phones (phone),
-      platform_links!inner (platform, platform_id)
-    `)
-    .eq('user_id', userId)
-
-  // Build lookup maps for matching
-  const emailToContactId = new Map<string, string>()
+  // Build lookup maps for matching against everything this user already has
+  const index = await loadIdentityIndex(db)
+  const emailToContactId = index.emails
+  const googleIdToContactId = index.googleIds
   const phoneToContactId = new Map<string, string>()
-  const googleIdToContactId = new Map<string, string>()
-
-  for (const contact of existingContacts || []) {
-    // Map emails
-    for (const e of contact.emails || []) {
-      emailToContactId.set(e.email.toLowerCase(), contact.id)
-    }
-    // Map phones
-    for (const p of contact.phones || []) {
-      const normalized = normalizePhone(p.phone)
-      if (normalized) {
-        phoneToContactId.set(normalized, contact.id)
-      }
-    }
-    // Map Google IDs
-    for (const link of contact.platform_links || []) {
-      if (link.platform === 'google') {
-        googleIdToContactId.set(link.platform_id, contact.id)
-      }
+  for (const p of index.phones) {
+    const normalized = normalizePhone(p.phone)
+    if (normalized) {
+      phoneToContactId.set(normalized, p.contact)
     }
   }
 
@@ -175,98 +155,39 @@ export async function syncGoogleContacts(
         }
       }
 
+      const fields = {
+        first_name: firstName,
+        last_name: lastName,
+        display_name: displayName,
+        company,
+        job_title: jobTitle,
+        is_financial_advisor: isFA,
+      }
+      const link = { platform: 'google' as const, platform_id: googleId }
+
       if (existingContactId) {
-        // Update existing contact
-        await supabase
-          .from('contacts')
-          .update({
-            first_name: firstName,
-            last_name: lastName,
-            display_name: displayName,
-            company,
-            job_title: jobTitle,
-            is_financial_advisor: isFA,
-          })
-          .eq('id', existingContactId)
-
-        // Ensure platform link exists
-        await supabase
-          .from('platform_links')
-          .upsert({
-            contact_id: existingContactId,
-            platform: 'google',
-            platform_id: googleId,
-            last_synced_at: new Date().toISOString(),
-          }, {
-            onConflict: 'contact_id,platform',
-            ignoreDuplicates: false,
-          })
-
+        await updateImportedContact(db, userId, existingContactId, fields, link)
+        googleIdToContactId.set(googleId, existingContactId)
         result.updated++
       } else {
-        // Create new contact
-        const { data: newContact, error: insertError } = await supabase
-          .from('contacts')
-          .insert({
-            user_id: userId,
-            first_name: firstName,
-            last_name: lastName,
-            display_name: displayName,
-            company,
-            job_title: jobTitle,
-            is_financial_advisor: isFA,
-          })
-          .select('id')
-          .single()
-
-        if (insertError || !newContact) {
-          result.errors.push(`Failed to insert contact ${displayName}: ${insertError?.message}`)
-          continue
-        }
-
-        // Add emails
-        if (emails.length > 0) {
-          await supabase.from('emails').insert(
-            emails.map((e, i) => ({
-              contact_id: newContact.id,
-              email: e.email,
-              label: e.label,
-              is_primary: i === 0,
-            }))
-          )
-        }
-
-        // Add phones
-        if (phones.length > 0) {
-          await supabase.from('phones').insert(
-            phones.map((p, i) => ({
-              contact_id: newContact.id,
-              phone: p.phone,
-              label: p.label,
-              is_primary: i === 0,
-            }))
-          )
-        }
-
-        // Add platform link
-        await supabase.from('platform_links').insert({
-          contact_id: newContact.id,
-          platform: 'google',
-          platform_id: googleId,
-          last_synced_at: new Date().toISOString(),
+        const newContactId = await createContact(db, userId, {
+          fields,
+          emails: emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
+          phones: phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
+          links: [link],
         })
 
         // Update lookup maps for subsequent matching
         for (const e of emails) {
-          emailToContactId.set(e.email.toLowerCase(), newContact.id)
+          emailToContactId.set(e.email.toLowerCase(), newContactId)
         }
         for (const p of phones) {
           const normalized = normalizePhone(p.phone)
           if (normalized) {
-            phoneToContactId.set(normalized, newContact.id)
+            phoneToContactId.set(normalized, newContactId)
           }
         }
-        googleIdToContactId.set(googleId, newContact.id)
+        googleIdToContactId.set(googleId, newContactId)
 
         result.imported++
       }

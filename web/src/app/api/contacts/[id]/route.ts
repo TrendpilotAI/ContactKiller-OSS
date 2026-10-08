@@ -1,77 +1,59 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { deleteContact, getContact, updateContact } from '@/lib/db/contacts'
+import { InvalidRecordKeyError } from '@/lib/db/client'
+import { withSession } from '@/lib/db/session'
+import { parseContactPatch } from '@/lib/contact-input'
+
+type RouteContext = { params: Promise<{ id: string }> }
+
+function notFound() {
+  return NextResponse.json({ error: 'Contact not found' }, { status: 404 })
+}
 
 // GET /api/contacts/:id - Get single contact
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function GET(request: NextRequest, { params }: RouteContext) {
   const { id } = await params
-  const supabase = await createClient()
-
-  const { data, error } = await supabase
-    .from('contacts')
-    .select(`
-      *,
-      emails (*),
-      phones (*),
-      platform_links (*)
-    `)
-    .eq('id', id)
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 404 })
-  }
-
-  return NextResponse.json(data)
+  return withSession(async ({ db }) => {
+    try {
+      const contact = await getContact(db, id)
+      return contact ? NextResponse.json(contact) : notFound()
+    } catch (error) {
+      if (error instanceof InvalidRecordKeyError) return notFound()
+      throw error
+    }
+  })
 }
 
 // PATCH /api/contacts/:id - Update contact
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function PATCH(request: NextRequest, { params }: RouteContext) {
   const { id } = await params
-  const supabase = await createClient()
-  const body = await request.json()
-
-  const { first_name, last_name, is_financial_advisor } = body
-
-  const { data, error } = await supabase
-    .from('contacts')
-    .update({
-      ...(first_name !== undefined && { first_name }),
-      ...(last_name !== undefined && { last_name }),
-      ...(is_financial_advisor !== undefined && { is_financial_advisor }),
-    })
-    .eq('id', id)
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  const body = await request.json().catch(() => null)
+  const parsed = parseContactPatch(body)
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: 400 })
   }
 
-  return NextResponse.json(data)
+  return withSession(async ({ db }) => {
+    try {
+      if (!(await updateContact(db, id, parsed.value))) return notFound()
+      return NextResponse.json(await getContact(db, id))
+    } catch (error) {
+      if (error instanceof InvalidRecordKeyError) return notFound()
+      throw error
+    }
+  })
 }
 
 // DELETE /api/contacts/:id - Delete contact
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function DELETE(request: NextRequest, { params }: RouteContext) {
   const { id } = await params
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('contacts')
-    .delete()
-    .eq('id', id)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json({ success: true })
+  return withSession(async ({ db }) => {
+    try {
+      if (!(await deleteContact(db, id))) return notFound()
+      return NextResponse.json({ success: true })
+    } catch (error) {
+      if (error instanceof InvalidRecordKeyError) return notFound()
+      throw error
+    }
+  })
 }

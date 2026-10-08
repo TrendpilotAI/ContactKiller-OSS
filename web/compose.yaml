@@ -1,0 +1,33 @@
+# Local development SurrealDB for the ContactKiller web prototype.
+#
+#   cp compose.env.example compose.env      # then edit the password
+#   docker compose --env-file compose.env up -d --wait
+#   bun run db:migrate
+#
+# The port is bound to loopback only. Do not publish it: SurrealDB sign-up is
+# reachable by anyone who can connect.
+name: contactkiller-dev
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3.3.0
+    command: ["start", "--log", "info", "--bind", "0.0.0.0:8000", "surrealkv:/data/contactkiller.db"]
+    # Fresh named volumes are root-owned; this is a disposable development
+    # database, not a deployment recipe.
+    user: root
+    environment:
+      SURREAL_USER: ${SURREALDB_ROOT_USER:?copy compose.env.example to compose.env}
+      SURREAL_PASS: ${SURREALDB_ROOT_PASSWORD:?copy compose.env.example to compose.env}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - surrealdb-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  surrealdb-data:

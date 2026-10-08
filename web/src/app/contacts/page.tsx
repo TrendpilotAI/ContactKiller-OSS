@@ -1,4 +1,5 @@
-import { createClient } from '@/lib/supabase/server'
+import { countContacts, listContacts } from '@/lib/db/contacts'
+import { requireSession } from '@/lib/db/session'
 import Link from 'next/link'
 import { ContactsTable } from './contacts-table'
 
@@ -10,48 +11,24 @@ export default async function ContactsPage({
   searchParams: Promise<{ filter?: string; search?: string }>
 }) {
   const { filter, search } = await searchParams
-  const supabase = await createClient()
+  const session = await requireSession('/contacts')
 
-  let query = supabase
-    .from('contacts')
-    .select(`
-      *,
-      emails (*),
-      phones (*),
-      platform_links (*)
-    `)
-    .order('updated_at', { ascending: false })
-    .limit(100)
-
-  // Apply filter
-  if (filter === 'personal') {
-    query = query.eq('is_financial_advisor', false)
-  } else if (filter === 'fa') {
-    query = query.eq('is_financial_advisor', true)
-  }
-
-  // Apply search (simple name search)
-  if (search) {
-    query = query.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%`)
-  }
-
-  const { data: contacts, error } = await query
-
-  if (error) {
+  let contacts: Awaited<ReturnType<typeof listContacts>> = []
+  let counts = { total: 0, financialAdvisors: 0 }
+  try {
+    ;[contacts, counts] = await Promise.all([
+      listContacts(session.db, { filter, search, limit: 100 }),
+      countContacts(session.db),
+    ])
+  } catch (error) {
     console.error('Error fetching contacts:', error)
+  } finally {
+    await session.close()
   }
 
-  // Get counts
-  const { count: totalCount } = await supabase
-    .from('contacts')
-    .select('*', { count: 'exact', head: true })
-
-  const { count: faCount } = await supabase
-    .from('contacts')
-    .select('*', { count: 'exact', head: true })
-    .eq('is_financial_advisor', true)
-
-  const personalCount = (totalCount || 0) - (faCount || 0)
+  const totalCount = counts.total
+  const faCount = counts.financialAdvisors
+  const personalCount = totalCount - faCount
 
   return (
     <main className="min-h-screen bg-gray-50">
@@ -60,7 +37,7 @@ export default async function ContactsPage({
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Contacts</h1>
             <p className="text-sm text-gray-500 mt-1">
-              {totalCount || 0} total • {personalCount} personal • {faCount || 0} financial advisors
+              {totalCount} total • {personalCount} personal • {faCount} financial advisors
             </p>
           </div>
           <Link
@@ -98,7 +75,7 @@ export default async function ContactsPage({
         </div>
 
         {/* Contacts Table */}
-        <ContactsTable contacts={contacts || []} />
+        <ContactsTable contacts={contacts} />
       </div>
     </main>
   )
