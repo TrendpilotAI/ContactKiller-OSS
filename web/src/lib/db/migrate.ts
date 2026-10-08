@@ -20,6 +20,26 @@ export interface MigrationResult {
   skipped: string[]
 }
 
+export class MigrationTransactionError extends Error {
+  constructor(file: string) {
+    super(
+      `${file} contains its own BEGIN/COMMIT/CANCEL. The runner wraps every migration ` +
+        'in a transaction together with its bookkeeping row; remove the statement.'
+    )
+    this.name = 'MigrationTransactionError'
+  }
+}
+
+export class RollbackNotConfirmedError extends Error {
+  constructor() {
+    super(
+      'Rolling back a migration drops schema and data. Pass { confirm: true } ' +
+        '(CLI: --confirm or CONTACTKILLER_CONFIRM_ROLLBACK=yes) to proceed.'
+    )
+    this.name = 'RollbackNotConfirmedError'
+  }
+}
+
 export class MigrationChecksumError extends Error {
   constructor(name: string) {
     super(
@@ -30,8 +50,23 @@ export class MigrationChecksumError extends Error {
   }
 }
 
+// Hash and execute the LF form so a checkout with CRLF line endings produces
+// the same checksum as the recorded one.
+function normalizeLineEndings(sql: string): string {
+  return sql.replace(/\r\n?/g, '\n')
+}
+
 function checksum(sql: string): string {
   return createHash('sha256').update(sql).digest('hex')
+}
+
+const TRANSACTION_STATEMENT = /^\s*(?:BEGIN|COMMIT|CANCEL)\b/im
+
+function assertNoTransactionStatements(file: string, sql: string): void {
+  const withoutComments = sql.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+  if (TRANSACTION_STATEMENT.test(withoutComments) || /;\s*(?:BEGIN|COMMIT|CANCEL)\b/i.test(withoutComments)) {
+    throw new MigrationTransactionError(file)
+  }
 }
 
 export async function readMigrations(dir: string = MIGRATIONS_DIR): Promise<MigrationFile[]> {
@@ -40,7 +75,8 @@ export async function readMigrations(dir: string = MIGRATIONS_DIR): Promise<Migr
   for (const entry of entries) {
     const match = UP_FILE.exec(entry)
     if (!match) continue
-    const sql = await readFile(join(dir, entry), 'utf8')
+    const sql = normalizeLineEndings(await readFile(join(dir, entry), 'utf8'))
+    assertNoTransactionStatements(entry, sql)
     files.push({ name: match[1], sql, checksum: checksum(sql) })
   }
   return files
@@ -103,30 +139,45 @@ export async function migrate(
   return result
 }
 
+export interface RollbackOptions {
+  confirm?: boolean
+}
+
 // Rolls back the most recently applied migration using its `.down.surql` file.
+// Destructive, so it needs explicit confirmation, and it refuses when the up
+// file on disk is not the one that was applied.
 export async function rollbackLatest(
   db: Db,
   config: SurrealConfig,
-  dir: string = MIGRATIONS_DIR
+  dir: string = MIGRATIONS_DIR,
+  options: RollbackOptions = {}
 ): Promise<string | null> {
+  if (options.confirm !== true) throw new RollbackNotConfirmedError()
+
   await prepareDatabase(db, config)
   const [rows] = await db
-    .query('SELECT name FROM migration ORDER BY name DESC LIMIT 1')
-    .collect<[{ name: string }[]]>()
-  const latest = rows[0]?.name
+    .query('SELECT name, checksum FROM migration ORDER BY name DESC LIMIT 1')
+    .collect<[{ name: string; checksum: string }[]]>()
+  const latest = rows[0]
   if (!latest) return null
 
-  const downFile = (await readdir(dir)).find((entry) => DOWN_FILE.exec(entry)?.[1] === latest)
-  if (!downFile) throw new Error(`No rollback file (${latest}.down.surql) for migration ${latest}.`)
-  const sql = await readFile(join(dir, downFile), 'utf8')
+  const onDisk = (await readMigrations(dir)).find((file) => file.name === latest.name)
+  if (!onDisk || onDisk.checksum !== latest.checksum) {
+    throw new MigrationChecksumError(latest.name)
+  }
+
+  const downFile = (await readdir(dir)).find((entry) => DOWN_FILE.exec(entry)?.[1] === latest.name)
+  if (!downFile) throw new Error(`No rollback file (${latest.name}.down.surql) for migration ${latest.name}.`)
+  const sql = normalizeLineEndings(await readFile(join(dir, downFile), 'utf8'))
+  assertNoTransactionStatements(downFile, sql)
   await db
     .query(
       `BEGIN;
        ${sql}
        DELETE migration WHERE name = $name;
        COMMIT;`,
-      { name: latest }
+      { name: latest.name }
     )
     .collect()
-  return latest
+  return latest.name
 }

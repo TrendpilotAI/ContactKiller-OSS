@@ -2,7 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MigrationChecksumError, migrate, readMigrations, rollbackLatest } from '@/lib/db/migrate'
+import {
+  MigrationChecksumError,
+  MigrationTransactionError,
+  RollbackNotConfirmedError,
+  migrate,
+  readMigrations,
+  rollbackLatest,
+} from '@/lib/db/migrate'
+import { isSignupEnabledInDatabase } from '@/lib/db/settings'
 import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
 
 describe.skipIf(!surrealAvailable)('migrations', () => {
@@ -25,6 +33,8 @@ describe.skipIf(!surrealAvailable)('migrations', () => {
 
     const first = await migrate(database.admin, database.config)
     expect(first.applied).toEqual(shipped)
+
+    expect(await isSignupEnabledInDatabase(database.admin)).toBe(false)
 
     const second = await migrate(database.admin, database.config)
     expect(second.applied).toEqual([])
@@ -68,19 +78,52 @@ describe.skipIf(!surrealAvailable)('migrations', () => {
     expect(rows).toEqual([])
   })
 
-  test('rollback removes the latest migration, its schema, and its record', async () => {
+  test('rollback needs explicit confirmation', async () => {
+    await expect(rollbackLatest(database.admin, database.config)).rejects.toBeInstanceOf(RollbackNotConfirmedError)
+    await expect(
+      rollbackLatest(database.admin, database.config, undefined, { confirm: false })
+    ).rejects.toBeInstanceOf(RollbackNotConfirmedError)
+  })
+
+  test('rollback unwinds migrations newest first, including schema and records', async () => {
     const isolated = await startTestDatabase({ migrate: false })
     try {
-      const [{ name }] = await readMigrations()
+      const names = (await readMigrations()).map((file) => file.name)
       await migrate(isolated.admin, isolated.config)
+      const confirm = { confirm: true }
 
-      expect(await rollbackLatest(isolated.admin, isolated.config)).toBe(name)
+      expect(await rollbackLatest(isolated.admin, isolated.config, undefined, confirm)).toBe(names[names.length - 1])
+      const [mid] = await isolated.admin.query('INFO FOR DB').collect<[{ tables: Record<string, string> }]>()
+      expect(Object.keys(mid.tables)).not.toContain('setting')
+      expect(Object.keys(mid.tables)).toContain('contact')
+
+      for (let index = names.length - 2; index >= 0; index -= 1) {
+        expect(await rollbackLatest(isolated.admin, isolated.config, undefined, confirm)).toBe(names[index])
+      }
       const [info] = await isolated.admin.query('INFO FOR DB').collect<[{ tables: Record<string, string>; accesses: Record<string, string> }]>()
       expect(Object.keys(info.tables)).not.toContain('contact')
       expect(Object.keys(info.accesses)).not.toContain('account')
-      expect(await rollbackLatest(isolated.admin, isolated.config)).toBeNull()
+      expect(await rollbackLatest(isolated.admin, isolated.config, undefined, confirm)).toBeNull()
 
-      expect((await migrate(isolated.admin, isolated.config)).applied).toEqual([name])
+      expect((await migrate(isolated.admin, isolated.config)).applied).toEqual(names)
+    } finally {
+      await isolated.stop()
+    }
+  })
+
+  test('rollback refuses when the up file no longer matches what was applied', async () => {
+    const dir = await mkdtemp(join(scratch, 'drift-'))
+    await writeFile(join(dir, '0001_gadgets.surql'), 'DEFINE TABLE gadget SCHEMALESS;')
+    await writeFile(join(dir, '0001_gadgets.down.surql'), 'REMOVE TABLE gadget;')
+    const isolated = await startTestDatabase({ migrate: false })
+    try {
+      await migrate(isolated.admin, isolated.config, dir)
+      await writeFile(join(dir, '0001_gadgets.surql'), 'DEFINE TABLE gadget SCHEMAFULL;')
+      await expect(
+        rollbackLatest(isolated.admin, isolated.config, dir, { confirm: true })
+      ).rejects.toBeInstanceOf(MigrationChecksumError)
+      const [info] = await isolated.admin.query('INFO FOR DB').collect<[{ tables: Record<string, string> }]>()
+      expect(Object.keys(info.tables)).toContain('gadget')
     } finally {
       await isolated.stop()
     }
@@ -92,9 +135,34 @@ describe.skipIf(!surrealAvailable)('migrations', () => {
     const isolated = await startTestDatabase({ migrate: false })
     try {
       await migrate(isolated.admin, isolated.config, dir)
-      await expect(rollbackLatest(isolated.admin, isolated.config, dir)).rejects.toThrow('No rollback file')
+      await expect(
+        rollbackLatest(isolated.admin, isolated.config, dir, { confirm: true })
+      ).rejects.toThrow('No rollback file')
     } finally {
       await isolated.stop()
     }
+  })
+
+  test('CRLF checkouts hash identically to LF files', async () => {
+    const lf = await mkdtemp(join(scratch, 'lf-'))
+    const crlf = await mkdtemp(join(scratch, 'crlf-'))
+    await writeFile(join(lf, '0001_crlf.surql'), 'DEFINE TABLE a SCHEMALESS;\nDEFINE TABLE b SCHEMALESS;\n')
+    await writeFile(join(crlf, '0001_crlf.surql'), 'DEFINE TABLE a SCHEMALESS;\r\nDEFINE TABLE b SCHEMALESS;\r\n')
+    expect((await readMigrations(crlf))[0].checksum).toBe((await readMigrations(lf))[0].checksum)
+  })
+
+  test('migration files may not manage their own transaction', async () => {
+    for (const [index, body] of [
+      'BEGIN;\nDEFINE TABLE c SCHEMALESS;\nCOMMIT;',
+      'DEFINE TABLE c SCHEMALESS;\n  commit transaction;',
+      'DEFINE TABLE c SCHEMALESS; CANCEL;',
+    ].entries()) {
+      const dir = await mkdtemp(join(scratch, `txn-${index}-`))
+      await writeFile(join(dir, '0001_own_txn.surql'), body)
+      await expect(readMigrations(dir)).rejects.toBeInstanceOf(MigrationTransactionError)
+    }
+    const dir = await mkdtemp(join(scratch, 'txn-comment-'))
+    await writeFile(join(dir, '0001_ok.surql'), '-- BEGIN and COMMIT are added by the runner\nDEFINE TABLE c SCHEMALESS;')
+    expect(await readMigrations(dir)).toHaveLength(1)
   })
 })

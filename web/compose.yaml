@@ -16,8 +16,8 @@ services:
     # database, not a deployment recipe.
     user: root
     environment:
-      SURREAL_USER: ${SURREALDB_ROOT_USER:?copy compose.env.example to compose.env}
-      SURREAL_PASS: ${SURREALDB_ROOT_PASSWORD:?copy compose.env.example to compose.env}
+      SURREAL_USER: ${SURREALDB_ROOT_USER:?copy compose.env.example to compose.env and set a root password}
+      SURREAL_PASS: ${SURREALDB_ROOT_PASSWORD:?copy compose.env.example to compose.env and set a root password}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

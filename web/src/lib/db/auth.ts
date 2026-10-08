@@ -7,6 +7,7 @@ export type AuthErrorCode =
   | 'invalid_email'
   | 'invalid_password_length'
   | 'email_taken'
+  | 'signup_disabled'
 
 export const MIN_PASSWORD_LENGTH = 12
 export const MAX_PASSWORD_LENGTH = 256
@@ -28,6 +29,7 @@ export const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
   invalid_email: 'Enter a valid email address.',
   invalid_password_length: `Password must be ${MIN_PASSWORD_LENGTH} to ${MAX_PASSWORD_LENGTH} characters.`,
   email_taken: 'Sign-up failed. That email may already be registered.',
+  signup_disabled: 'Sign-up is disabled on this instance.',
 }
 
 function validateCredentials(email: unknown, password: unknown): { email: string; password: string } {
@@ -65,7 +67,7 @@ export async function signUp(config: SurrealConfig, email: unknown, password: un
     return accessToken(tokens)
   } catch (error) {
     if (error instanceof ThrownError) {
-      const code = error.message.match(/invalid_(?:email|password_length|credentials)/)?.[0]
+      const code = error.message.match(/invalid_(?:email|password_length|credentials)|signup_disabled/)?.[0]
       if (code) throw new AuthError(code as AuthErrorCode)
     }
     // The only other way the SIGNUP block fails is the unique email index.
@@ -77,7 +79,11 @@ export async function signUp(config: SurrealConfig, email: unknown, password: un
 }
 
 export async function signIn(config: SurrealConfig, email: unknown, password: unknown): Promise<string> {
-  if (typeof email !== 'string' || typeof password !== 'string') {
+  if (
+    typeof email !== 'string' ||
+    typeof password !== 'string' ||
+    password.length > MAX_PASSWORD_LENGTH
+  ) {
     throw new AuthError('invalid_credentials')
   }
   const db = await connectAnonymous(config)
@@ -90,7 +96,11 @@ export async function signIn(config: SurrealConfig, email: unknown, password: un
     })
     return accessToken(tokens)
   } catch (error) {
-    if (error instanceof NotFoundError || error instanceof NotAllowedError) {
+    if (
+      error instanceof NotFoundError ||
+      error instanceof NotAllowedError ||
+      error instanceof ThrownError
+    ) {
       throw new AuthError('invalid_credentials')
     }
     throw error

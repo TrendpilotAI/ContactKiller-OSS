@@ -16,7 +16,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: true }, { status: 201 })
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: AUTH_ERROR_MESSAGES[error.code], code: error.code }, { status: 400 })
+      return NextResponse.json({ error: AUTH_ERROR_MESSAGES[error.code], code: error.code },
+        { status: error.code === 'signup_disabled' ? 403 : 400 })
     }
     console.error('Sign-up failed:', error)
     return NextResponse.json({ error: 'Sign-up failed. Is SurrealDB running?' }, { status: 503 })

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { RecordId } from 'surrealdb'
-import { AuthError, signIn, signUp } from '@/lib/db/auth'
+import { AuthError, MAX_PASSWORD_LENGTH, signIn, signUp } from '@/lib/db/auth'
 import { connectAnonymous, connectWithToken } from '@/lib/db/client'
+import { isSignupEnabledInDatabase, setSignupEnabled } from '@/lib/db/settings'
 import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
 
 const PASSWORD = 'correct-horse-battery-1'
@@ -112,5 +113,98 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
     } finally {
       await db.close()
     }
+  })
+
+  describe('database-side sign-up gate', () => {
+    const directSignup = async (email: string) => {
+      const db = await connectAnonymous(database.config)
+      try {
+        return await db.signup({
+          namespace: database.config.namespace,
+          database: database.config.database,
+          access: 'account',
+          variables: { email, password: PASSWORD },
+        })
+      } finally {
+        await db.close()
+      }
+    }
+
+    test('a direct SurrealDB sign-up fails while sign-up is disabled, and creates no user', async () => {
+      await setSignupEnabled(database.admin, false)
+      try {
+        await expect(directSignup('direct@example.com')).rejects.toThrow('signup_disabled')
+        expect(await codeOf(signUp(database.config, 'viaapp@example.com', PASSWORD))).toBe('signup_disabled')
+        const [rows] = await database.admin
+          .query("SELECT * FROM app_user WHERE email IN ['direct@example.com', 'viaapp@example.com']")
+          .collect<[unknown[]]>()
+        expect(rows).toEqual([])
+      } finally {
+        await setSignupEnabled(database.admin, true)
+      }
+    })
+
+    test('sign-up works again once the setting is enabled', async () => {
+      expect(await directSignup('enabled@example.com')).toHaveProperty('access')
+    })
+
+    test('a fresh migration leaves sign-up disabled and fails closed without the setting', async () => {
+      const fresh = await startTestDatabase({ signup: false })
+      try {
+        expect(await codeOf(signUp(fresh.config, 'fresh@example.com', PASSWORD))).toBe('signup_disabled')
+        await fresh.admin.query('DELETE setting').collect()
+        expect(await codeOf(signUp(fresh.config, 'fresh@example.com', PASSWORD))).toBe('signup_disabled')
+      } finally {
+        await fresh.stop()
+      }
+    })
+
+    test('record users cannot read or change the setting', async () => {
+      const token = await signIn(database.config, 'maya@example.com', PASSWORD)
+      const db = await connectWithToken(database.config, token)
+      try {
+        const [rows] = await db.query('SELECT * FROM setting').collect<[unknown[]]>()
+        expect(rows).toEqual([])
+        await db.query('UPSERT setting:signup SET enabled = false').collect()
+        expect(await isSignupEnabledInDatabase(database.admin)).toBe(true)
+      } finally {
+        await db.close()
+      }
+    })
+  })
+
+  describe('sign-in hardening', () => {
+    test('over-long passwords are rejected without reaching argon2', async () => {
+      const long = 'x'.repeat(MAX_PASSWORD_LENGTH + 1)
+      expect(await codeOf(signIn(database.config, 'maya@example.com', long))).toBe('invalid_credentials')
+
+      const db = await connectAnonymous(database.config)
+      try {
+        await expect(
+          db.signin({
+            namespace: database.config.namespace,
+            database: database.config.database,
+            access: 'account',
+            variables: { email: 'maya@example.com', password: long },
+          })
+        ).rejects.toThrow('invalid_credentials')
+      } finally {
+        await db.close()
+      }
+    })
+
+    test('unknown and known emails fail the same way, with comparable work', async () => {
+      const time = async (email: string) => {
+        const start = performance.now()
+        expect(await codeOf(signIn(database.config, email, 'wrong-password-123'))).toBe('invalid_credentials')
+        return performance.now() - start
+      }
+      await time('maya@example.com')
+      const known = await time('maya@example.com')
+      const unknown = await time('nobody-at-all@example.com')
+      // Both paths hash with argon2, so an unknown email must not return in a
+      // small fraction of the known-email time.
+      expect(unknown).toBeGreaterThan(known * 0.4)
+    })
   })
 })

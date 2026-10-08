@@ -6,6 +6,7 @@ import { RecordId } from 'surrealdb'
 import { connectAdmin, connectWithToken, type Db } from '@/lib/db/client'
 import type { SurrealAdminConfig } from '@/lib/db/config'
 import { migrate } from '@/lib/db/migrate'
+import { setSignupEnabled } from '@/lib/db/settings'
 import { signUp } from '@/lib/db/auth'
 
 export function surrealBinary(): string | null {
@@ -44,7 +45,9 @@ export interface TestDatabase {
 
 // Starts an in-memory server, applies the real migrations, and returns a
 // root-scope handle for assertions about what is stored.
-export async function startTestDatabase(options: { migrate?: boolean } = {}): Promise<TestDatabase> {
+export async function startTestDatabase(
+  options: { migrate?: boolean; signup?: boolean } = {}
+): Promise<TestDatabase> {
   const binary = surrealBinary()
   if (!binary) throw new Error('SurrealDB binary not available')
 
@@ -82,7 +85,10 @@ export async function startTestDatabase(options: { migrate?: boolean } = {}): Pr
     password,
   }
   const admin = await connectAdmin(config)
-  if (options.migrate !== false) await migrate(admin, config)
+  if (options.migrate !== false) {
+    await migrate(admin, config)
+    await setSignupEnabled(admin, options.signup ?? true)
+  }
   await admin.use({ namespace: config.namespace, database: config.database })
 
   return {
