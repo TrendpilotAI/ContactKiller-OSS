@@ -249,11 +249,12 @@ function scanTextContent(path: string, text: string): void {
   }
 }
 
-const selfPath = "scripts/check-public-release.ts";
+// Written so that this file's own source cannot match any pattern below.
 const privateIdentifierPatterns: Array<[RegExp, string]> = [
   [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
-  [/GS-CK-/u, "private factory task id"],
-  [/grok-ship/iu, "private originating-agent name"],
+  [/\bbc-(?=[0-9a-f]*[0-9])[0-9a-f]{8}\b/iu, "private cloud-agent id (short form)"],
+  [new RegExp("GS-C" + "K-", "u"), "private factory task id"],
+  [/grok-shi[p]/iu, "private originating-agent name"],
 ];
 
 function scanPrivateIdentifiers(path: string, text: string): void {
@@ -387,7 +388,7 @@ for (const path of listed) {
   }
 
   scanTextContent(path, text);
-  if (path !== selfPath) scanPrivateIdentifiers(path, text);
+  scanPrivateIdentifiers(path, text);
 }
 
 for (const exportPath of scanExportPaths) {
