@@ -61,7 +61,7 @@ Try Beads in your own projects:
 
 ```bash
 # Install Beads (method used in this repo; see AGENTS.md)
-npm install -g @beads/bd   # upstream: https://github.com/gastownhall/beads
+npm install -g @beads/bd@1.3.1   # upstream: https://github.com/gastownhall/beads
 
 # In this repo, fetch the existing tickets
 bd bootstrap --yes

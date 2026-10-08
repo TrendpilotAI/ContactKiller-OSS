@@ -27,12 +27,12 @@ Open GitHub issues and pull requests each get a ticket whose `--external-ref`
 is the GitHub URL.
 
 Before ending a session: close or update your tickets, run the relevant quality
-gates, and report status. Commit, push, and `bd dolt push` only when the task
-or owner explicitly authorises it, and run `bd dolt push` only after the export
-scan in "Persistence and publishing" passes. The generated block below has the
-full Session Completion protocol.
+gates, and report status. Commit, push, and publish ticket data only when the
+task or owner explicitly authorises it, and publish ticket data only with
+`scripts/bd-push.sh` (see "Persistence and publishing"). The generated block
+below has the full Session Completion protocol.
 
-Install: `npm install -g @beads/bd` (or `brew install beads`); upstream is
+Install: `npm install -g @beads/bd@1.3.1` (the version CI uses); upstream is
 <https://github.com/gastownhall/beads>. This repo was set up with bd 1.3.1,
 issue prefix `ck`, embedded Dolt storage. `bd` usage metrics default to on;
 see "Cursor hook" below for how to turn them off.
@@ -137,25 +137,58 @@ embedded tokens).
 
 **Every `bd dolt push` publishes the whole tracker, including its full Dolt
 history, to the public remote, and published history cannot be cleanly
-retracted.** Before any `bd dolt push`:
+retracted.** That makes the following a hard rule:
 
-1. Make sure the current tickets use only public aliases and example/noreply
-   emails.
-2. Run `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`,
-   `gitleaks`) and get a pass. It exports the local database and runs it, plus
-   the audit log, through the same email, phone, Supabase, forbidden-content and
-   private-identifier checks as `scripts/check-public-release.ts`, then
-   gitleaks.
-3. Push only when the task or owner explicitly authorises it, and never
-   force-push or delete `refs/dolt/data`.
+> **Never write an internal id, email address, phone number, secret, or any
+> other private detail into a ticket, label, assignee, description, note,
+> comment, memory, or audit entry, not even temporarily.** Editing or deleting
+> it afterwards does not help: Dolt keeps every earlier version, and the next
+> push publishes that history. Cleaning it out later needs an owner-approved
+> replacement of `refs/dolt/data` and a GitHub purge request.
 
-CI enforces the same scan on the published data: the `Beads export scan` job in
-`.github/workflows/ci.yml` installs a checksum-pinned `bd`, bootstraps from the
-repository's published tracker data, exports it, and runs
-`scripts/check-beads-export.sh`. It fails closed: a missing tool, a failed
-bootstrap or export, an empty export while the audit log records tickets, a
-recorded ticket missing from the export, or any scanner error fails the job.
-Note that the scan covers the current export; it cannot see earlier Dolt history.
+**What the scan does and does not prove.** `scripts/check-beads-export.sh` scans
+the current rows of `bd export --all` (issues, memories, infrastructure records,
+templates and gates) plus the audit log, using the same email, phone, Supabase,
+forbidden-content and private-identifier checks as
+`scripts/check-public-release.ts`, then gitleaks. It does **not** see the kv,
+config and events tables, nor the Dolt commit history. A green scan therefore
+does not prove that history is clean; only the rule above does.
+
+To publish ticket data, and only when the task or owner explicitly authorises
+it:
+
+1. Make sure no private detail was ever written to the tracker (the rule above).
+2. Push with `scripts/bd-push.sh` (not a bare `bd dolt push`). It runs
+   `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`, `gitleaks`)
+   and only then `bd dolt push`. The scan is required, but it is a backstop, not
+   permission to be careless.
+3. Never force-push, delete, or replace `refs/dolt/data`; `bd-push.sh` refuses
+   `--force`. Replacement is an owner-only decision.
+
+CI runs the same scan on the published data in
+`.github/workflows/beads-export.yml` (a separate workflow so the daily run does
+not re-run the app jobs). It runs on pull requests, pushes to `main`, a daily
+schedule and manual dispatch, because a push to `refs/dolt/data` cannot trigger
+a workflow itself. It installs a checksum-pinned `bd` (with metrics off),
+bootstraps from the published tracker data on a clean checkout, exports with
+`bd export --all`, and runs `scripts/check-beads-export.sh`. It fails closed: a
+missing tool, a failed bootstrap or export, an existing local database in
+published mode, an empty export while tickets are expected, an expected ticket
+missing from the export, or any scanner error fails the job.
+
+- **Which tickets are expected.** Every `bd create` event in the audit log,
+  except those whose latest event for that id is a `bd delete`. When you delete
+  a ticket, record a `bd delete` audit entry for it (same `bd audit record`
+  form, `--tool-name "bd delete"`), or the scan will fail forever on the missing
+  ticket. A later `bd create` for the same id makes it expected again.
+- **Pull requests.** The expected set comes from the base branch's audit log,
+  not the PR's. A PR that records a new `bd create` is therefore not red just
+  because the ticket is not published yet; the PR's own audit log and the
+  published export are still scanned. After merge, the `main` run expects the
+  new ticket to be published.
+- **Append-only.** On pull requests the public-release job requires the base
+  branch's `.beads/interactions.jsonl` to be a byte prefix of the PR's
+  (`scripts/check-audit-append-only.sh`); a missing file on the base passes.
 
 ### Cursor hook (opt-in, local only)
 
@@ -190,7 +223,8 @@ It requires `bd` on your `PATH`; without it the hooks fail. Note that `bd`
 anonymous usage metrics are **on by default** (command names, bd version and OS
 platform are sent to the upstream project). Turn them off with `bd metrics off`
 (stored per user in `~/.config/bd/config.yaml`); `bd metrics` shows the current
-state and `bd metrics example` shows what is sent. CI runs `bd metrics off`.
+state and `bd metrics example` shows what is sent. `DO_NOT_TRACK=1` in the
+environment also disables them; CI sets it and runs `bd metrics off`.
 
 ### Public-release check
 
@@ -198,7 +232,11 @@ state and `bd metrics example` shows what is sent. CI runs `bd metrics off`.
 `.jsonl`. The manifest's `forbiddenExtensionExceptions` carves out only
 `.beads/interactions.jsonl`; any other new tracker file must be added to
 `PUBLIC_RELEASE_MANIFEST.json` `allowedFiles`. Pass `--scan-export <file>...`
-to run only the content checks on arbitrary files, as the export scan does.
+to run only the content checks on arbitrary files, as the export scan does. It
+also fails on internal cloud-agent ids (full UUID form, and the `bc-` plus 8-hex
+short form when it contains a digit), internal factory task ids and
+originating-agent names in every tracked file, itself included; its own patterns
+are written so their source cannot match.
 
 ## Non-Interactive Shell Commands
 
