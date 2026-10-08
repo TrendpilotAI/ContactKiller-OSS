@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: beads-export-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   beads-export:
@@ -66,3 +66,28 @@ jobs:
           echo "BEADS_AUDIT_BASELINE=$baseline" >> "$GITHUB_ENV"
       - name: Bootstrap published tracker data, export, and scan
         run: scripts/check-beads-export.sh
+
+  alert:
+    name: Open or update the failure issue
+    needs: beads-export
+    if: ${{ always() && needs.beads-export.result == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the issue (link only; never include scan output)
+        shell: bash
+        run: |
+          title="Beads export scan failing"
+          body="The scheduled or manually dispatched Beads export scan failed. See the run for details: ${RUN_URL}"
+          existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

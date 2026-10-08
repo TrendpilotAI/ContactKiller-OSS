@@ -253,8 +253,8 @@ function scanTextContent(path: string, text: string): void {
 const privateIdentifierPatterns: Array<[RegExp, string]> = [
   [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
   [/\bbc-(?=[0-9a-f]*[0-9])[0-9a-f]{8}\b/iu, "private cloud-agent id (short form)"],
-  [new RegExp("GS-C" + "K-", "u"), "private factory task id"],
-  [/grok-shi[p]/iu, "private originating-agent name"],
+  [new RegExp("GS-C" + "K-", "iu"), "private factory task id"],
+  [/grok[\s_-]?shi[p]/iu, "private originating-agent name"],
 ];
 
 function scanPrivateIdentifiers(path: string, text: string): void {

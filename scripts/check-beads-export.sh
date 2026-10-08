@@ -11,17 +11,24 @@
 #                                            its own; see AGENTS.md.
 #
 # Optional environment:
-#   BEADS_AUDIT_BASELINE  Path to an audit log (possibly empty) to derive the
-#                         expected ticket ids from instead of the working-tree
-#                         log. CI sets it on pull requests to the base branch's
-#                         log, so a PR that records a new `bd create` is not
-#                         red just because that ticket is not published yet.
+#   BEADS_AUDIT_BASELINE  Path to the base branch's audit log (possibly empty).
+#                         CI sets it on pull requests: `bd create` events come
+#                         from the baseline, so a PR that records a new ticket is
+#                         not red just because it is not published yet, while
+#                         `bd delete` events the PR adds are still applied, so a
+#                         PR that deletes a published ticket is not red either.
+#   GITHUB_REPOSITORY     owner/name used to pin sync.remote in published mode
+#                         (default: TrendpilotAI/ContactKiller-OSS).
 #
 # Requires: bd, jq, bun, gitleaks, git. Any missing tool, bootstrap/export
 # error, empty export while tickets are expected, or scanner error fails the run.
 #
-# Not covered: the scan sees only current rows of `bd export --all`. It does
-# not see the kv, config and events tables or the Dolt commit history.
+# Also fails when `bd provenance log` returns anything for a ticket: this repo
+# does not use the native provenance table (AGENTS.md).
+#
+# Not covered: the scan sees only current rows of `bd export --all` and the
+# per-ticket `bd provenance log`. It does not see the kv, config and events
+# tables, provenance rows of deleted tickets, or the Dolt commit history.
 set -euo pipefail
 
 mode=published
@@ -49,7 +56,33 @@ if [ "$mode" = published ]; then
     echo "Use --local to scan the local database, or run from a fresh clone." >&2
     exit 1
   fi
-  bd bootstrap --yes
+
+  # The committed config decides where bootstrap fetches from; a PR must not be
+  # able to point it at a different (clean-looking) remote.
+  expected_remote="git+https://github.com/${GITHUB_REPOSITORY:-TrendpilotAI/ContactKiller-OSS}"
+  configured_remote="$(bd config get sync.remote)"
+  if [ "$configured_remote" != "$expected_remote" ]; then
+    echo "sync.remote is not the canonical remote for this repository" >&2
+    echo "  expected: $expected_remote" >&2
+    echo "  found:    $configured_remote" >&2
+    exit 1
+  fi
+  jq -e '.backend == "dolt" and .dolt_mode == "embedded"' .beads/metadata.json >/dev/null \
+    || { echo ".beads/metadata.json must select the embedded Dolt backend" >&2; exit 1; }
+
+  bootstrap_log="$(mktemp)"
+  bd bootstrap --yes 2>&1 | tee "$bootstrap_log"
+  if ! grep -qF "Synced database from $expected_remote" "$bootstrap_log"; then
+    echo "bootstrap did not sync-clone the published data from $expected_remote" >&2
+    echo "(it may have imported local files or created a fresh database)" >&2
+    exit 1
+  fi
+  rm -f "$bootstrap_log"
+  origin_remote="$(bd dolt remote list | awk '$1 == "origin" { print $2 }')"
+  if [ "$origin_remote" != "$expected_remote" ]; then
+    echo "bd's Dolt remote 'origin' is not $expected_remote" >&2
+    exit 1
+  fi
 fi
 
 scan_dir="$(mktemp -d)"
@@ -57,31 +90,47 @@ trap 'rm -rf "$scan_dir"' EXIT
 export_file="$scan_dir/beads-export.jsonl"
 bd export --all -o "$export_file"
 
-expected_source="${BEADS_AUDIT_BASELINE:-$audit_log}"
-[ -f "$expected_source" ] || { echo "audit baseline not found: $expected_source" >&2; exit 1; }
-
-# Tickets expected to be published: every `bd create` in the log, minus any
-# whose latest create/delete event is a `bd delete`.
-expected_ids="$(jq -rs '
-  reduce .[] as $e ({};
-    if ($e.tool_name // "") == "bd create" then .[$e.issue_id] = true
-    elif (($e.tool_name // "") | startswith("bd delete")) then .[$e.issue_id] = false
-    else . end)
-  | to_entries[] | select(.value) | .key' "$expected_source" | sort -u)"
+if [ -n "${BEADS_AUDIT_BASELINE:-}" ]; then
+  [ -f "$BEADS_AUDIT_BASELINE" ] || { echo "audit baseline not found: $BEADS_AUDIT_BASELINE" >&2; exit 1; }
+  expected_ids="$(scripts/beads-expected-ids.sh "$audit_log" "$BEADS_AUDIT_BASELINE")"
+else
+  expected_ids="$(scripts/beads-expected-ids.sh "$audit_log")"
+fi
+created_ids="$(scripts/beads-expected-ids.sh --created "$audit_log")"
 exported_ids="$(jq -r 'select(has("id")) | .id' "$export_file" | sort -u)"
 exported_count="$(printf '%s\n' "$exported_ids" | grep -c . || true)"
 expected_count="$(printf '%s\n' "$expected_ids" | grep -c . || true)"
 
 if [ "$expected_count" -gt 0 ] && [ "$exported_count" -eq 0 ]; then
-  echo "export is empty but $expected_count ticket(s) are expected from $expected_source" >&2
+  echo "export is empty but $expected_count ticket(s) are expected from the audit log" >&2
   exit 1
 fi
 missing="$(comm -23 <(printf '%s\n' "$expected_ids") <(printf '%s\n' "$exported_ids"))"
 if [ -n "$missing" ]; then
-  echo "tickets recorded in $expected_source are missing from the export:" >&2
+  echo "tickets recorded in the audit log are missing from the export:" >&2
   printf '%s\n' "$missing" >&2
   exit 1
 fi
+unrecorded="$(comm -13 <(printf '%s\n' "$created_ids") <(printf '%s\n' "$exported_ids"))"
+if [ -n "$unrecorded" ]; then
+  echo "tickets in the export have no \"bd create\" entry in the audit log (record one per ticket):" >&2
+  printf '%s\n' "$unrecorded" >&2
+  exit 1
+fi
+
+# The native provenance table is not used in this repo and is not part of
+# `bd export`; dump it per ticket so it is scanned, and fail if it has rows.
+provenance_dir="$scan_dir/provenance"
+mkdir -p "$provenance_dir"
+provenance_rows=0
+n=0
+for id in $exported_ids; do
+  n=$((n + 1))
+  out="$provenance_dir/ticket-$n.json"
+  bd provenance log "$id" --json > "$out"
+  rows="$(jq 'length' "$out")"
+  provenance_rows=$((provenance_rows + rows))
+done
 
 cp "$audit_log" "$scan_dir/interactions.jsonl"
 if [ ! -s "$export_file" ]; then
@@ -93,6 +142,14 @@ if [ ! -s "$export_file" ]; then
 else
   bun scripts/check-public-release.ts --scan-export "$export_file" "$scan_dir/interactions.jsonl"
 fi
+if compgen -G "$provenance_dir/*.json" >/dev/null; then
+  bun scripts/check-public-release.ts --scan-export "$provenance_dir"/*.json
+fi
 gitleaks dir "$scan_dir" --redact --no-banner
+
+if [ "$provenance_rows" -gt 0 ]; then
+  echo "bd provenance log returned $provenance_rows row(s): the native provenance table must stay empty in this public repo (AGENTS.md)" >&2
+  exit 1
+fi
 
 echo "Beads export scan passed: $exported_count ticket(s) exported ($mode mode)."

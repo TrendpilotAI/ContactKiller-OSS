@@ -10,6 +10,11 @@ file=.beads/interactions.jsonl
 
 cd "$(git rev-parse --show-toplevel)"
 
+if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+  echo "base revision $base is not available in this clone; cannot verify the audit log" >&2
+  exit 1
+fi
+
 if ! git cat-file -e "$base:$file" 2>/dev/null; then
   echo "$file does not exist on $base; nothing to compare."
   exit 0

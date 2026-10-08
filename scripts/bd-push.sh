@@ -6,7 +6,7 @@ set -euo pipefail
 
 for arg in "$@"; do
   case "$arg" in
-    --force|-f)
+    --force|--force=*|--force-*|-f*|-[!-]*f*)
       echo "refusing to force-push tracker data; replacing refs/dolt/data is an owner-only decision" >&2
       exit 2
       ;;
