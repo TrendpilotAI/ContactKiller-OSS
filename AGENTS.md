@@ -15,7 +15,14 @@ repo-level rule and takes precedence over the generated Beads block below.
    reference the final PR or commit.
 5. **Record** every ticket creation as an audit event (see Provenance).
 
-Do not track work in markdown TODO lists, chat-only plans, or ad hoc files.
+Durable work items (anything another agent or a later session needs to see)
+belong in `bd`, not in markdown TODO files or chat-only plans. In-session
+scratch todos (for example an agent's TodoWrite or TaskCreate checklist for the
+current turn) and agent memory features (including `MEMORY.md`-style files) are
+allowed. Treat them as private scratch space, not shared project state, and
+move anything durable into a ticket. This overrides the generated Beads block
+below, which says never to use those tools.
+
 Open GitHub issues and pull requests each get a ticket whose `--external-ref`
 is the GitHub URL.
 
