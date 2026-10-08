@@ -6,7 +6,7 @@
 - Node.js 20.9+ for Next.js
 - Python 3.11+ for the ActiveGraph pack
 - DuckDB CLI 1.5.5+ for the local forensic-cache tool and its integration tests
-- Supabase for the current web prototype
+- Docker (or a SurrealDB 3.x server binary) for the web prototype's database
 
 ## Clean setup
 
@@ -16,24 +16,41 @@ cd ContactKiller-OSS
 
 cd web
 cp .env.local.example .env.local
+cp compose.env.example compose.env
 bun install
+# start the local database and apply the schema (see below), then:
 bun run dev
 ```
 
 Use this public repository for development; the private internal archive is not a contributor source.
 
-The command above starts the interface but does not provision its backend. For a disposable development environment:
+The commands above start the interface but do not provision its database. For a disposable local environment:
 
-1. Apply `web/supabase/migrations/001_initial_schema.sql` and then `002_security_and_oauth.sql` to a development Supabase project.
-2. Copy only that project's URL and anonymous key into `.env.local`.
-3. For Google import, create a development OAuth web client and register `${NEXT_PUBLIC_APP_URL}/api/auth/google/callback` as an authorized redirect URI.
-4. Establish a Supabase user session separately; the current prototype does not ship a login screen.
+1. Copy `web/compose.env.example` to `web/compose.env` (git-ignored) and set a local SurrealDB root password.
+2. Start SurrealDB: `docker compose --env-file compose.env up -d --wait`. The container is pinned to a SurrealDB release, stores data in a named volume, and binds `127.0.0.1:8000` only.
+3. Set `CONTACTKILLER_TOKEN_ENCRYPTION_KEY` in `.env.local` to the output of `openssl rand -base64 32`.
+4. Apply the schema: `bun run db:migrate`. It creates the namespace and database named in `.env.local`, applies each `web/surreal/migrations/*.surql` file in one transaction together with its bookkeeping row, refuses to re-run a file whose contents changed, and is safe to repeat. `bun run db:rollback` undoes the latest migration using its `.down.surql` file.
+5. Open `/login` and create a local account. Sign-up is gated by `CONTACTKILLER_ALLOW_SIGNUP`; leave it `false` anywhere other people can reach the app.
+6. For Google import, create a development OAuth web client and register `${NEXT_PUBLIC_APP_URL}/api/auth/google/callback` as an authorized redirect URI.
 
-Provider routes are therefore experimental integration surfaces, not a one-command end-to-end demo.
+Provider routes are experimental integration surfaces, not a one-command end-to-end demo.
+
+If you already run SurrealDB elsewhere, point `SURREALDB_URL`, `SURREALDB_NAMESPACE`, and `SURREALDB_DATABASE` at it and give `compose.env` credentials that may create a namespace and database. Reset local data with `docker compose --env-file compose.env down -v`.
+
+### Web tests
+
+`bun test` in `web/` runs unit tests and integration tests for the persistence layer. The integration tests start a throwaway in-memory SurrealDB server on a random port, apply the real migrations, and exercise authentication, tenant isolation, contact CRUD, cascades, conflicts, encrypted token storage, and the Google and vCard importers with synthetic data. They need a SurrealDB server binary: put `surreal` on `PATH` or set `SURREAL_BIN`. Without one they are skipped locally and fail under `CI=true`.
+
+### How persistence is wired
+
+- **Accounts and sessions.** `web/surreal/migrations/0001_initial_schema.surql` defines a record access method named `account` (argon2 password hashes, 8-hour tokens). `/api/auth/signup` and `/api/auth/signin` exchange credentials for a SurrealDB token that is stored in an httpOnly `ck_session` cookie. Every request opens a connection authenticated with that token, so SurrealDB applies the table permissions for that user.
+- **Ownership.** Each user-owned table has a read-only `owner` field and a `PERMISSIONS ... WHERE owner = $auth` clause; child rows can only be created under the owner's own contact. SurrealDB reports a denied `CREATE` as an empty result rather than an error, so repository code and tests check what was stored.
+- **Provider tokens.** Google tokens are encrypted with AES-256-GCM in `web/src/lib/db/crypto.ts` before they are written, bound to their owner and provider. The database only holds ciphertext. Losing or rotating the key means reconnecting providers.
+- **Root credentials** (`SURREALDB_ROOT_USER`/`SURREALDB_ROOT_PASSWORD`) are read only by `bun run db:migrate` and the test harness, never by the Next.js runtime.
 
 ## Environment variables
 
-`web/.env.local.example` is the authority for the prototype. Values must point to a development tenant. Do not commit `.env`, `.env.local`, exported shell state, provider credentials, or deployment tokens.
+`web/.env.local.example` is the authority for the prototype's runtime settings and `web/compose.env.example` for local database provisioning. Values must point to a development database. Do not commit `.env`, `.env.local`, exported shell state, provider credentials, or deployment tokens.
 
 ## Local data
 
@@ -61,4 +78,4 @@ Do not include provider writes in the first adapter pull request.
 
 ## Database work
 
-Schema changes require migration, rollback, tenant-isolation tests, replay impact, and an explanation of which store is authoritative. Never make a projection the only copy of source evidence or decisions.
+Schema changes require a new numbered migration (never edit an applied one) with a matching `.down.surql` rollback, tenant-isolation tests, replay impact, and an explanation of which store is authoritative. Never make a projection the only copy of source evidence or decisions.

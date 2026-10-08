@@ -1,6 +1,6 @@
 # SurrealDB integration status
 
-SurrealDB is the experimental target for a canonical multi-model persistence boundary. It is not the default branch's production authority.
+SurrealDB backs the web prototype's mutable application state and is the experimental target for a canonical multi-model persistence boundary. It is not yet a production authority.
 
 ## Why it fits the problem
 
@@ -12,11 +12,19 @@ SurrealDB is the experimental target for a canonical multi-model persistence bou
 
 ## Current public scope
 
-The sanitized default branch documents the persistence contract but does not ship a SurrealDB store or application cutover. Non-public development work has explored schema, ingestion, and ActiveGraph store adapters; none of that work is a public capability until it is independently reviewed and merged into this repository.
+The web prototype (`web/`) is SurrealDB-only. It replaces the earlier hosted-Postgres persistence layer, which no longer exists in this tree. What ships:
+
+- a record access method for sign-up and sign-in, with argon2 password hashes;
+- schemafull tables for users, contacts, emails, phones, platform links, conflicts, sync logs, and OAuth tokens, each carrying a read-only `owner` and an `owner = $auth` permission clause, with cascade deletes from contacts to their children;
+- AES-256-GCM encryption of provider tokens in the application before storage;
+- numbered SurrealQL migrations with checksums, transactional apply, and rollback files; and
+- tests that run against a real in-memory SurrealDB server.
+
+These tables are mutable application state. Raw source payloads, content hashes, field-level provenance edges, append-only observations, ActiveGraph event storage, and graph projections are not implemented; non-public development work on those has not been reviewed for this repository.
 
 ## Acceptance gates
 
-SurrealDB becomes authoritative only after the project proves:
+SurrealDB becomes authoritative for provenance and decisions only after the project proves:
 
 1. atomic and truthful manifest completion;
 2. exact source-byte preservation and content hashes;
