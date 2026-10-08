@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { people_v1 } from 'googleapis'
-import { listContacts } from '@/lib/db/contacts'
+import { createContact, getContact, listContacts } from '@/lib/db/contacts'
 import { FA_EMAIL_DOMAINS } from '@/lib/fa-detection'
 import { finishSyncLog, startSyncLog } from '@/lib/db/sync-logs'
 import { normalizePhone, reconcileGoogleContacts } from '@/lib/sync/google'
@@ -43,9 +43,33 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
   })
 
   describe('Google reconciliation', () => {
+    const fresh = async (label: string) => createTestUser(database, label)
+
+    const seedLocal = async (
+      user: TestUser,
+      fields: Partial<Record<'first_name' | 'last_name' | 'company' | 'job_title', string>> & {
+        display_name: string
+        is_financial_advisor?: boolean
+      },
+      channels: { emails?: string[]; phones?: string[]; googleId?: string } = {}
+    ) =>
+      createContact(user.db, user.id, {
+        fields,
+        emails: (channels.emails ?? []).map((value) => ({ value })),
+        phones: (channels.phones ?? []).map((value) => ({ value })),
+        links: channels.googleId ? [{ platform: 'google', platform_id: channels.googleId }] : [],
+      })
+
+    const conflictsFor = async (user: TestUser) => {
+      const [rows] = await user.db
+        .query('SELECT field, value_a, value_b, source_a, source_b, resolved FROM conflict ORDER BY field')
+        .collect<[Record<string, unknown>[]]>()
+      return rows
+    }
+
     test('imports new contacts with emails, phones, links, and advisor detection', async () => {
       const result = await reconcileGoogleContacts(alice.db, alice.id, [maya, advisor])
-      expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [] })
+      expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [] })
 
       const contacts = await listContacts(alice.db)
       const imported = contacts.find((c) => c.first_name === 'Maya')!
@@ -65,44 +89,262 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
       expect(contacts.find((c) => c.first_name === 'Sam')!.is_financial_advisor).toBe(true)
     })
 
-    test('is idempotent: a second run updates in place and creates no duplicates', async () => {
+    test('is idempotent: re-running changes nothing and files no duplicate conflicts', async () => {
       const changed: Person = { ...maya, organizations: [{ name: 'Renamed Studio', title: 'Lead' }] }
-      const result = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
-      expect(result).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [] })
+      const first = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
+      expect(first).toEqual({ imported: 0, updated: 2, conflicts: 2, errors: [], skipped: [] })
+      const second = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
+      expect(second).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [] })
 
-      const contacts = await listContacts(alice.db)
-      expect(contacts).toHaveLength(2)
-      expect(contacts.find((c) => c.first_name === 'Maya')).toMatchObject({ company: 'Renamed Studio', job_title: 'Lead' })
-      const links = contacts.flatMap((c) => c.platform_links)
+      expect(await listContacts(alice.db)).toHaveLength(2)
+      expect(await conflictsFor(alice)).toHaveLength(2)
+      const links = (await listContacts(alice.db)).flatMap((c) => c.platform_links)
       expect(links).toHaveLength(2)
       expect(links.every((l) => l.last_synced_at !== null)).toBe(true)
     })
 
-    test('matches an existing contact by email (case-insensitive) or normalized phone', async () => {
-      const byEmail: Person = { resourceName: 'people/c2001', names: [{ givenName: 'M.' }], emailAddresses: [{ value: 'MAYA@example.COM' }] }
-      const byPhone: Person = { resourceName: 'people/c2002', names: [{ givenName: 'Sam', familyName: 'R.' }], phoneNumbers: [{ value: '+1 202 555 0143' }] }
-      const result = await reconcileGoogleContacts(alice.db, alice.id, [byEmail, byPhone])
-      expect(result).toMatchObject({ imported: 0, updated: 2, errors: [] })
-      expect(await listContacts(alice.db)).toHaveLength(2)
+    test('an exact match keeps local values, fills empty ones, and files a conflict for differences', async () => {
+      const user = await fresh('merge')
+      try {
+        const id = await seedLocal(
+          user,
+          { display_name: 'Maya C.', first_name: 'Maya', company: 'Local Studio', is_financial_advisor: true },
+          { emails: ['maya@example.com'] }
+        )
+        const result = await reconcileGoogleContacts(user.db, user.id, [
+          {
+            resourceName: 'people/m1',
+            names: [{ givenName: 'Maya', familyName: 'Chen', displayName: 'Maya Chen' }],
+            emailAddresses: [{ value: 'MAYA@example.com' }],
+            organizations: [{ name: 'Google Studio', title: 'Designer' }],
+          },
+        ])
+        expect(result).toEqual({ imported: 0, updated: 1, conflicts: 2, errors: [], skipped: [] })
+
+        const contact = (await getContact(user.db, id))!
+        expect(contact).toMatchObject({
+          first_name: 'Maya', // equal, untouched
+          last_name: 'Chen', // empty locally, filled
+          job_title: 'Designer', // empty locally, filled
+          display_name: 'Maya C.', // differs, kept
+          company: 'Local Studio', // differs, kept
+          is_financial_advisor: true, // never reset
+        })
+        expect(contact.platform_links.map((l) => l.platform_id)).toEqual(['people/m1'])
+        expect(await conflictsFor(user)).toEqual([
+          { field: 'company', value_a: 'Local Studio', value_b: 'Google Studio', source_a: 'local', source_b: 'google', resolved: false },
+          { field: 'display_name', value_a: 'Maya C.', value_b: 'Maya Chen', source_a: 'local', source_b: 'google', resolved: false },
+        ])
+      } finally {
+        await user.db.close()
+      }
     })
 
-    test('contacts without a provider link are still matched', async () => {
-      const manual = await listContacts(bob.db)
-      expect(manual).toEqual([])
-      await bob.db
-        .query(
-          `BEGIN;
-           LET $c = (CREATE ONLY contact CONTENT { owner: $owner, display_name: 'Manual Entry' });
-           CREATE email CONTENT { owner: $owner, contact: $c.id, email: 'manual@example.com' };
-           COMMIT;`,
-          { owner: bob.id }
-        )
-        .collect()
-      const result = await reconcileGoogleContacts(bob.db, bob.id, [
-        { resourceName: 'people/c3001', names: [{ displayName: 'Manual Entry' }], emailAddresses: [{ value: 'manual@example.com' }] },
-      ])
-      expect(result).toMatchObject({ imported: 0, updated: 1 })
-      expect(await listContacts(bob.db)).toHaveLength(1)
+    test('a resolved disagreement is not filed again on the next sync', async () => {
+      const user = await fresh('resolved')
+      try {
+        await seedLocal(user, { display_name: 'Pat', company: 'Local Co' }, { emails: ['pat@example.com'] })
+        const person: Person = {
+          resourceName: 'people/p1',
+          names: [{ displayName: 'Pat' }],
+          emailAddresses: [{ value: 'pat@example.com' }],
+          organizations: [{ name: 'Remote Co' }],
+        }
+        expect((await reconcileGoogleContacts(user.db, user.id, [person])).conflicts).toBe(1)
+        await user.db.query('UPDATE conflict SET resolved = true').collect()
+        expect((await reconcileGoogleContacts(user.db, user.id, [person])).conflicts).toBe(0)
+        expect(await conflictsFor(user)).toHaveLength(1)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a Google contact with no name never replaces a local name', async () => {
+      const user = await fresh('nameless')
+      try {
+        const id = await seedLocal(user, { display_name: 'Real Name' }, { emails: ['nameless@example.com'] })
+        const result = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/n1', emailAddresses: [{ value: 'nameless@example.com' }] },
+        ])
+        expect(result).toMatchObject({ updated: 1, conflicts: 0 })
+        expect((await getContact(user.db, id))!.display_name).toBe('Real Name')
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('matches by email case-insensitively, by exact phone, and by existing Google id', async () => {
+      const user = await fresh('matcher')
+      try {
+        const byEmail = await seedLocal(user, { display_name: 'E' }, { emails: ['Case@Example.com'] })
+        const byPhone = await seedLocal(user, { display_name: 'P' }, { phones: ['(202) 555-0143'] })
+        const byId = await seedLocal(user, { display_name: 'I' }, { emails: ['old@example.com'], googleId: 'people/x3' })
+
+        const result = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/x1', names: [{ displayName: 'E' }], emailAddresses: [{ value: 'case@example.com' }] },
+          { resourceName: 'people/x2', names: [{ displayName: 'P' }], phoneNumbers: [{ value: '+1 202 555 0143' }] },
+          { resourceName: 'people/x3', names: [{ displayName: 'I' }], emailAddresses: [{ value: 'changed@example.com' }] },
+        ])
+        expect(result).toEqual({ imported: 0, updated: 3, conflicts: 0, errors: [], skipped: [] })
+        expect((await getContact(user.db, byEmail))!.platform_links[0].platform_id).toBe('people/x1')
+        expect((await getContact(user.db, byPhone))!.platform_links[0].platform_id).toBe('people/x2')
+        expect((await getContact(user.db, byId))!.platform_links[0].platform_id).toBe('people/x3')
+        expect(await listContacts(user.db)).toHaveLength(3)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    describe('exact phone identity', () => {
+      const tail = '2025550143'
+
+      test('normalizePhone accepts valid numbers and nothing else', () => {
+        expect(normalizePhone('(202) 555-0143')).toBe('+12025550143')
+        expect(normalizePhone('+1 202 555 0143')).toBe('+12025550143')
+        for (const invalid of ['555-0143', '0143', 'call me', '', `+44${tail}`, `00${tail}`, `1${tail}${tail}`]) {
+          expect(normalizePhone(invalid)).toBeNull()
+        }
+      })
+
+      test('numbers that differ only in area code are different people', () => {
+        expect(normalizePhone('(202) 555-0143')).not.toBe(normalizePhone('(212) 555-0143'))
+      })
+
+      test('numbers with the same last ten digits but different leading digits do not match', async () => {
+        const user = await fresh('digits')
+        try {
+          await seedLocal(user, { display_name: 'US Number' }, { phones: ['(202) 555-0143'] })
+          for (const [index, other] of [`+44${tail}`, `+7${tail}`, `+99${tail}`, `0011${tail}`].entries()) {
+            expect(normalizePhone(other)).not.toBe('+12025550143')
+            const result = await reconcileGoogleContacts(user.db, user.id, [
+              { resourceName: `people/far${index}`, names: [{ displayName: `Far ${index}` }], phoneNumbers: [{ value: other }] },
+            ])
+            expect(result).toMatchObject({ imported: 1, updated: 0, skipped: [] })
+          }
+          const usNumber = (await listContacts(user.db)).find((c) => c.display_name === 'US Number')!
+          expect(usNumber.platform_links).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a different area code is imported as a separate contact', async () => {
+        const user = await fresh('areacode')
+        try {
+          await seedLocal(user, { display_name: 'Area 202' }, { phones: ['(202) 555-0143'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/a212', names: [{ displayName: 'Area 212' }], phoneNumbers: [{ value: '(212) 555-0143' }] },
+          ])
+          expect(result).toMatchObject({ imported: 1, updated: 0 })
+          expect(await listContacts(user.db)).toHaveLength(2)
+        } finally {
+          await user.db.close()
+        }
+      })
+    })
+
+    describe('ambiguity never links or merges', () => {
+      test('one email shared by two Google contacts: neither is linked to the local contact', async () => {
+        const user = await fresh('shared')
+        try {
+          const id = await seedLocal(user, { display_name: 'Local Owner', company: 'Mine' }, { emails: ['shared@example.com'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/s1', names: [{ displayName: 'First' }], emailAddresses: [{ value: 'shared@example.com' }], organizations: [{ name: 'One' }] },
+            { resourceName: 'people/s2', names: [{ displayName: 'Second' }], emailAddresses: [{ value: 'SHARED@example.com' }], organizations: [{ name: 'Two' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0, conflicts: 0, errors: [] })
+          expect(result.skipped).toHaveLength(2)
+          expect(result.skipped[0]).toContain('shared by more than one Google contact')
+
+          const contact = (await getContact(user.db, id))!
+          expect(contact).toMatchObject({ display_name: 'Local Owner', company: 'Mine' })
+          expect(contact.platform_links).toEqual([])
+          expect(await listContacts(user.db)).toHaveLength(1)
+          expect(await conflictsFor(user)).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('one email shared by two new Google contacts creates neither', async () => {
+        const user = await fresh('sharednew')
+        try {
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/t1', names: [{ displayName: 'Twin A' }], emailAddresses: [{ value: 'twins@example.com' }] },
+            { resourceName: 'people/t2', names: [{ displayName: 'Twin B' }], emailAddresses: [{ value: 'twins@example.com' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0 })
+          expect(result.skipped).toHaveLength(2)
+          expect(await listContacts(user.db)).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a Google contact never replaces an existing Google link with a different id', async () => {
+        const user = await fresh('relink')
+        try {
+          const id = await seedLocal(user, { display_name: 'Linked', company: 'Keep' }, { emails: ['linked@example.com'], googleId: 'people/original' })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/impostor', names: [{ displayName: 'Other Person' }], emailAddresses: [{ value: 'linked@example.com' }], organizations: [{ name: 'Other Co' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0, conflicts: 0 })
+          expect(result.skipped).toEqual([expect.stringContaining('already linked to a different Google contact')])
+
+          const contact = (await getContact(user.db, id))!
+          expect(contact.platform_links.map((l) => l.platform_id)).toEqual(['people/original'])
+          expect(contact).toMatchObject({ display_name: 'Linked', company: 'Keep' })
+          expect(await listContacts(user.db)).toHaveLength(1)
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('two Google contacts reaching one local contact by different identifiers are both skipped', async () => {
+        const user = await fresh('claims')
+        try {
+          const id = await seedLocal(user, { display_name: 'Contested' }, { emails: ['contested@example.com'], phones: ['(202) 555-0143'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/c1', names: [{ displayName: 'By Email' }], emailAddresses: [{ value: 'contested@example.com' }] },
+            { resourceName: 'people/c2', names: [{ displayName: 'By Phone' }], phoneNumbers: [{ value: '+1 202 555 0143' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0 })
+          expect(result.skipped).toHaveLength(2)
+          expect((await getContact(user.db, id))!.platform_links).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('identifiers that match two different local contacts are skipped', async () => {
+        const user = await fresh('dupes')
+        try {
+          await seedLocal(user, { display_name: 'Twin One' }, { emails: ['dupe@example.com'] })
+          await seedLocal(user, { display_name: 'Twin Two' }, { emails: ['dupe@example.com'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/d1', names: [{ displayName: 'Dupe' }], emailAddresses: [{ value: 'dupe@example.com' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0 })
+          expect(result.skipped).toEqual([expect.stringContaining('more than one existing contact')])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a phone shared by two Google contacts is not identity evidence', async () => {
+        const user = await fresh('landline')
+        try {
+          const id = await seedLocal(user, { display_name: 'Household' }, { phones: ['(202) 555-0143'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/h1', names: [{ displayName: 'Parent' }], phoneNumbers: [{ value: '(202) 555-0143' }] },
+            { resourceName: 'people/h2', names: [{ displayName: 'Child' }], phoneNumbers: [{ value: '202-555-0143' }] },
+          ])
+          expect(result).toMatchObject({ imported: 2, updated: 0, skipped: [] })
+          expect((await getContact(user.db, id))!.platform_links).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
     })
 
     test("one user's import never matches or touches another user's contacts", async () => {
@@ -112,24 +354,19 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
       expect(await listContacts(alice.db)).toEqual(before)
     })
 
-    test('records without a provider id are skipped and do not stop the rest', async () => {
-      const carol = await createTestUser(database, 'carol')
+    test('records without a provider id are skipped silently and do not stop the rest', async () => {
+      const carol = await fresh('carol')
       try {
         const result = await reconcileGoogleContacts(carol.db, carol.id, [
           { resourceName: 'people/c4001', names: [{ displayName: 'Fine One' }] },
           { names: [{ displayName: 'No Resource Name' }] },
           { resourceName: 'people/c4002', names: [{ displayName: 'Fine Two' }] },
         ])
-        expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [] })
+        expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [] })
         expect(await listContacts(carol.db)).toHaveLength(2)
       } finally {
         await carol.db.close()
       }
-    })
-
-    test('phone normalization matches formatting variants', () => {
-      expect(normalizePhone('(202) 555-0143')).toBe('+12025550143')
-      expect(normalizePhone('+1 202 555 0143')).toBe('+12025550143')
     })
   })
 

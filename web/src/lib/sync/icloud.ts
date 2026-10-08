@@ -40,7 +40,7 @@ export async function importVcf(db: Db, userId: RecordId, vcfContent: string): P
     throw new EmptyVcfError()
   }
 
-  const emailToContactId = (await loadIdentityIndex(db)).emails
+  const knownEmails = (await loadIdentityIndex(db)).emails
 
   for (const card of cards) {
     try {
@@ -72,7 +72,7 @@ export async function importVcf(db: Db, userId: RecordId, vcfContent: string): P
       const org = getString(data.org)?.split(';')[0] || null
       const title = getString(data.title)
 
-      if (emails.some(e => emailToContactId.has(e.email.toLowerCase()))) {
+      if (emails.some(e => knownEmails.has(e.email.toLowerCase()))) {
         result.duplicates++
         continue
       }
@@ -92,7 +92,7 @@ export async function importVcf(db: Db, userId: RecordId, vcfContent: string): P
       })
 
       for (const e of emails) {
-        emailToContactId.set(e.email.toLowerCase(), contactId)
+        knownEmails.set(e.email.toLowerCase(), new Set([contactId]))
       }
 
       result.imported++

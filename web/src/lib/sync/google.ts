@@ -1,7 +1,7 @@
 import { google, people_v1 } from 'googleapis'
 import type { RecordId } from 'surrealdb'
 import type { Db } from '@/lib/db/client'
-import { createContact, loadIdentityIndex, updateImportedContact } from '@/lib/db/contacts'
+import { createContact, loadIdentityIndex, mergeImportedContact, type ImportedFields } from '@/lib/db/contacts'
 import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
 import { parsePhoneNumber } from 'libphonenumber-js'
 
@@ -14,6 +14,8 @@ export interface SyncResult {
   updated: number
   conflicts: number
   errors: string[]
+  // Google contacts deliberately not linked or merged, with the reason.
+  skipped: string[]
 }
 
 // Fetch all contacts from Google using pagination
@@ -45,22 +47,16 @@ export async function fetchGoogleContacts(
   return allContacts
 }
 
-// Normalize phone number for consistent matching
+// Exact phone identity: the number must parse as a valid number. There is no
+// "last 10 digits" fallback, so numbers that differ in area code, country
+// code, or leading digits never compare equal.
 export function normalizePhone(phone: string): string | null {
   try {
-    // Try to parse as US number first, then international
     const parsed = parsePhoneNumber(phone, 'US')
-    if (parsed) {
-      return parsed.format('E.164') // e.g., +12025550123
-    }
+    return parsed.isValid() ? parsed.format('E.164') : null
   } catch {
-    // Fall back to simple normalization
-    const digits = phone.replace(/\D/g, '')
-    if (digits.length >= 10) {
-      return digits.slice(-10)
-    }
+    return null
   }
-  return null
 }
 
 // Sync Google contacts into SurrealDB for one user
@@ -70,6 +66,67 @@ export async function syncGoogleContacts(
   accessToken: string
 ): Promise<SyncResult> {
   return reconcileGoogleContacts(db, userId, await fetchGoogleContacts(accessToken))
+}
+
+interface Candidate {
+  googleId: string
+  fields: ImportedFields
+  emails: { email: string; label: string }[]
+  phones: { phone: string; label: string }[]
+  emailKeys: string[]
+  phoneKeys: string[]
+}
+
+type Decision =
+  | { kind: 'create' }
+  | { kind: 'update'; target: string; linkedById: boolean }
+  | { kind: 'skip'; reason: string }
+
+function toCandidate(gc: people_v1.Schema$Person): Candidate | null {
+  const googleId = gc.resourceName
+  if (!googleId) return null
+
+  const name = gc.names?.[0]
+  const firstName = name?.givenName || null
+  const lastName = name?.familyName || null
+  const displayName = name?.displayName || `${firstName || ''} ${lastName || ''}`.trim() || null
+
+  const emails = (gc.emailAddresses || []).map(e => ({
+    email: e.value!,
+    label: e.type || 'other',
+  })).filter(e => e.email)
+
+  const phones = (gc.phoneNumbers || []).map(p => ({
+    phone: p.value!,
+    label: p.type || 'other',
+  })).filter(p => p.phone)
+
+  return {
+    googleId,
+    fields: {
+      first_name: firstName,
+      last_name: lastName,
+      display_name: displayName,
+      company: gc.organizations?.[0]?.name || null,
+      job_title: gc.organizations?.[0]?.title || null,
+    },
+    emails,
+    phones,
+    emailKeys: [...new Set(emails.map(e => e.email.trim().toLowerCase()))],
+    phoneKeys: [...new Set(phones.map(p => normalizePhone(p.phone)).filter((p): p is string => p !== null))],
+  }
+}
+
+function owners(keysByCandidate: Candidate[], pick: (c: Candidate) => string[]): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>()
+  for (const candidate of keysByCandidate) {
+    for (const key of pick(candidate)) {
+      const set = map.get(key) ?? new Set<string>()
+      set.add(candidate.googleId)
+      map.set(key, set)
+    }
+  }
+  return map
 }
 
 export async function reconcileGoogleContacts(
@@ -82,113 +139,132 @@ export async function reconcileGoogleContacts(
     updated: 0,
     conflicts: 0,
     errors: [],
+    skipped: [],
   }
 
-  // Build lookup maps for matching against everything this user already has
-  const index = await loadIdentityIndex(db)
-  const emailToContactId = index.emails
-  const googleIdToContactId = index.googleIds
-  const phoneToContactId = new Map<string, string>()
-  for (const p of index.phones) {
-    const normalized = normalizePhone(p.phone)
-    if (normalized) {
-      phoneToContactId.set(normalized, p.contact)
+  const seen = new Set<string>()
+  const candidates: Candidate[] = []
+  for (const gc of googleContacts) {
+    const candidate = toCandidate(gc)
+    if (candidate && !seen.has(candidate.googleId)) {
+      seen.add(candidate.googleId)
+      candidates.push(candidate)
     }
   }
 
-  // Process each Google contact
-  for (const gc of googleContacts) {
-    try {
-      const googleId = gc.resourceName
-      if (!googleId) continue
+  const index = await loadIdentityIndex(db)
+  const localPhones = new Map<string, Set<string>>()
+  for (const p of index.phones) {
+    const normalized = normalizePhone(p.phone)
+    if (normalized) {
+      const set = localPhones.get(normalized) ?? new Set<string>()
+      set.add(p.contact)
+      localPhones.set(normalized, set)
+    }
+  }
+  const emailOwners = owners(candidates, c => c.emailKeys)
+  const phoneOwners = owners(candidates, c => c.phoneKeys)
 
-      // Extract contact data
-      const name = gc.names?.[0]
-      const firstName = name?.givenName || null
-      const lastName = name?.familyName || null
-      const displayName = name?.displayName || `${firstName || ''} ${lastName || ''}`.trim() || 'Unknown'
+  // Pass 1: decide, using only exact identifiers and only against what existed
+  // before this batch. Nothing here writes.
+  const decisions = new Map<string, Decision>()
+  for (const candidate of candidates) {
+    const linked = index.googleIds.get(candidate.googleId)
+    if (linked) {
+      decisions.set(candidate.googleId, { kind: 'update', target: linked, linkedById: true })
+      continue
+    }
 
-      const emails = (gc.emailAddresses || []).map(e => ({
-        email: e.value!,
-        label: e.type || 'other',
-      })).filter(e => e.email)
+    if (candidate.emailKeys.some(email => (emailOwners.get(email)?.size ?? 0) > 1)) {
+      decisions.set(candidate.googleId, {
+        kind: 'skip',
+        reason: 'an email address is shared by more than one Google contact',
+      })
+      continue
+    }
 
-      const phones = (gc.phoneNumbers || []).map(p => ({
-        phone: p.value!,
-        label: p.type || 'other',
-      })).filter(p => p.phone)
+    const targets = new Set<string>()
+    for (const email of candidate.emailKeys) {
+      for (const contact of index.emails.get(email) ?? []) targets.add(contact)
+    }
+    // A phone shared by several Google contacts (a family landline) is not
+    // identity evidence for any of them.
+    for (const phone of candidate.phoneKeys) {
+      if ((phoneOwners.get(phone)?.size ?? 0) > 1) continue
+      for (const contact of localPhones.get(phone) ?? []) targets.add(contact)
+    }
 
-      const company = gc.organizations?.[0]?.name || null
-      const jobTitle = gc.organizations?.[0]?.title || null
-
-      // Check if FA based on email domains
-      const isFA = isLikelyFinancialAdvisor(emails.map(e => e.email))
-
-      // Try to find existing contact
-      let existingContactId: string | null = null
-
-      // 1. Check by Google ID (most reliable)
-      existingContactId = googleIdToContactId.get(googleId) || null
-
-      // 2. Check by email
-      if (!existingContactId) {
-        for (const e of emails) {
-          const id = emailToContactId.get(e.email.toLowerCase())
-          if (id) {
-            existingContactId = id
-            break
-          }
-        }
-      }
-
-      // 3. Check by phone
-      if (!existingContactId) {
-        for (const p of phones) {
-          const normalized = normalizePhone(p.phone)
-          if (normalized) {
-            const id = phoneToContactId.get(normalized)
-            if (id) {
-              existingContactId = id
-              break
+    if (targets.size > 1) {
+      decisions.set(candidate.googleId, {
+        kind: 'skip',
+        reason: 'its identifiers match more than one existing contact',
+      })
+    } else if (targets.size === 1) {
+      const [target] = targets
+      const existingLink = index.googleLinkByContact.get(target)
+      decisions.set(
+        candidate.googleId,
+        existingLink
+          ? {
+              kind: 'skip',
+              reason: 'the matching contact is already linked to a different Google contact',
             }
-          }
-        }
-      }
+          : { kind: 'update', target, linkedById: false }
+      )
+    } else {
+      decisions.set(candidate.googleId, { kind: 'create' })
+    }
+  }
 
-      const fields = {
-        first_name: firstName,
-        last_name: lastName,
-        display_name: displayName,
-        company,
-        job_title: jobTitle,
-        is_financial_advisor: isFA,
+  // Pass 2: two Google contacts claiming the same unlinked local contact are
+  // both ambiguous; neither may take it.
+  const claims = new Map<string, string[]>()
+  for (const [googleId, decision] of decisions) {
+    if (decision.kind === 'update' && !decision.linkedById) {
+      claims.set(decision.target, [...(claims.get(decision.target) ?? []), googleId])
+    }
+  }
+  for (const claimants of claims.values()) {
+    if (claimants.length > 1) {
+      for (const googleId of claimants) {
+        decisions.set(googleId, {
+          kind: 'skip',
+          reason: 'the matching contact was also matched by another Google contact',
+        })
       }
-      const link = { platform: 'google' as const, platform_id: googleId }
+    }
+  }
 
-      if (existingContactId) {
-        await updateImportedContact(db, userId, existingContactId, fields, link)
-        googleIdToContactId.set(googleId, existingContactId)
+  // Pass 3: write.
+  for (const candidate of candidates) {
+    const decision = decisions.get(candidate.googleId)!
+    try {
+      if (decision.kind === 'skip') {
+        const message = `${candidate.googleId}: not linked, ${decision.reason}`
+        console.warn(`Google sync skipped ${message}`)
+        result.skipped.push(message)
+      } else if (decision.kind === 'update') {
+        const outcome = await mergeImportedContact(
+          db,
+          userId,
+          decision.target,
+          candidate.fields,
+          { platform: 'google', platform_id: candidate.googleId },
+          { local: 'local', provider: 'google' }
+        )
+        result.conflicts += outcome.conflicts.length
         result.updated++
       } else {
-        const newContactId = await createContact(db, userId, {
-          fields,
-          emails: emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
-          phones: phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
-          links: [link],
+        await createContact(db, userId, {
+          fields: {
+            ...candidate.fields,
+            display_name: candidate.fields.display_name || 'Unknown',
+            is_financial_advisor: isLikelyFinancialAdvisor(candidate.emails.map(e => e.email)),
+          },
+          emails: candidate.emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
+          phones: candidate.phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
+          links: [{ platform: 'google', platform_id: candidate.googleId }],
         })
-
-        // Update lookup maps for subsequent matching
-        for (const e of emails) {
-          emailToContactId.set(e.email.toLowerCase(), newContactId)
-        }
-        for (const p of phones) {
-          const normalized = normalizePhone(p.phone)
-          if (normalized) {
-            phoneToContactId.set(normalized, newContactId)
-          }
-        }
-        googleIdToContactId.set(googleId, newContactId)
-
         result.imported++
       }
     } catch (err) {

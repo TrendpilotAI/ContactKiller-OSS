@@ -213,9 +213,12 @@ export async function bulkSetFinancialAdvisor(
 }
 
 export interface IdentityIndex {
-  emails: Map<string, string>
+  // Every contact that owns an address, so duplicates stay visible instead of
+  // one silently shadowing another.
+  emails: Map<string, Set<string>>
   phones: Array<{ phone: string; contact: string }>
   googleIds: Map<string, string>
+  googleLinkByContact: Map<string, string>
 }
 
 // Loads every identifier the importers use for duplicate matching. Reads are
@@ -232,50 +235,123 @@ export async function loadIdentityIndex(db: Db): Promise<IdentityIndex> {
       { contact: RecordId; phone: string }[],
       { contact: RecordId; platform_id: string }[],
     ]>()
+
+  const emailIndex = new Map<string, Set<string>>()
+  for (const row of emails) {
+    const owners = emailIndex.get(row.email_lower) ?? new Set<string>()
+    owners.add(String(row.contact.id))
+    emailIndex.set(row.email_lower, owners)
+  }
   return {
-    emails: new Map(emails.map((row) => [row.email_lower, String(row.contact.id)])),
+    emails: emailIndex,
     phones: phones.map((row) => ({ phone: row.phone, contact: String(row.contact.id) })),
     googleIds: new Map(links.map((row) => [row.platform_id, String(row.contact.id)])),
+    googleLinkByContact: new Map(links.map((row) => [String(row.contact.id), row.platform_id])),
   }
 }
 
-export async function updateImportedContact(
+export const MERGE_FIELDS = ['first_name', 'last_name', 'display_name', 'company', 'job_title'] as const
+export type MergeField = (typeof MERGE_FIELDS)[number]
+export type ImportedFields = Record<MergeField, string | null>
+
+export interface MergeOutcome {
+  filled: MergeField[]
+  conflicts: MergeField[]
+}
+
+// The placeholder written when a provider record has no name at all.
+const PLACEHOLDER_DISPLAY_NAME = 'Unknown'
+
+function isBlank(field: MergeField, value: string | null | undefined): boolean {
+  if (value === null || value === undefined || value.trim() === '') return true
+  return field === 'display_name' && value === PLACEHOLDER_DISPLAY_NAME
+}
+
+function blankSql(field: MergeField): string {
+  const placeholder = field === 'display_name' ? ` OR ${field} = '${PLACEHOLDER_DISPLAY_NAME}'` : ''
+  return `(${field} = NONE OR ${field} = NULL OR string::trim(${field}) = ''${placeholder})`
+}
+
+// Applies provider data to a contact that was matched on an exact identifier.
+// A match is evidence, not permission to overwrite:
+//   - values already set locally are kept;
+//   - empty local fields are filled;
+//   - a different non-empty provider value becomes a conflict for review
+//     (once: the same disagreement is not filed again, even after resolution);
+//   - is_financial_advisor is never touched; and
+//   - the provider link's platform_id is never replaced.
+export async function mergeImportedContact(
   db: Db,
   owner: RecordId,
   key: string,
-  fields: Omit<ContactFields, 'notes'>,
-  link: PlatformLinkInput
-): Promise<void> {
+  incoming: ImportedFields,
+  link: PlatformLinkInput,
+  sources: { local: string; provider: string }
+): Promise<MergeOutcome> {
+  const id = recordId('contact', key)
+  const [contacts, existingConflicts] = await db
+    .query(
+      `SELECT first_name, last_name, display_name, company, job_title FROM contact WHERE id = $id;
+       SELECT field, value_a, value_b FROM conflict WHERE contact = $id`,
+      { id }
+    )
+    .collect<[
+      Record<MergeField, string | null | undefined>[],
+      { field: string; value_a: string | null; value_b: string | null }[],
+    ]>()
+  const current = contacts[0]
+  if (!current) throw new Error('Matched contact no longer exists.')
+
+  const filled: MergeField[] = []
+  const conflicts: { field: MergeField; value_a: string; value_b: string }[] = []
+  for (const field of MERGE_FIELDS) {
+    const theirs = incoming[field]?.trim()
+    if (!theirs) continue
+    const mine = current[field]
+    if (isBlank(field, mine)) {
+      filled.push(field)
+    } else if (mine!.trim() !== theirs) {
+      const alreadyFiled = existingConflicts.some(
+        (row) => row.field === field && row.value_a === mine && row.value_b === theirs
+      )
+      if (!alreadyFiled) conflicts.push({ field, value_a: mine!, value_b: theirs })
+    }
+  }
+
+  const vars: Record<string, unknown> = {
+    owner,
+    id,
+    link,
+    conflicts: conflicts.map((conflict) => ({
+      ...conflict,
+      source_a: sources.local,
+      source_b: sources.provider,
+    })),
+  }
+  const assignments = filled.map((field) => {
+    vars[`fill_${field}`] = incoming[field]!.trim()
+    // Re-checked inside the statement so a concurrent edit is never overwritten.
+    return `${field} = IF ${blankSql(field)} { $fill_${field} } ELSE { ${field} }`
+  })
+
   await db
     .query(
       `BEGIN;
-       UPDATE contact SET
-         first_name = $fields.first_name,
-         last_name = $fields.last_name,
-         display_name = $fields.display_name,
-         company = $fields.company,
-         job_title = $fields.job_title,
-         is_financial_advisor = $fields.is_financial_advisor
-         WHERE id = $id;
+       ${assignments.length > 0 ? `UPDATE contact SET ${assignments.join(', ')} WHERE id = $id;` : ''}
+       FOR $c IN $conflicts {
+         CREATE conflict CONTENT {
+           owner: $owner, contact: $id, field: $c.field,
+           value_a: $c.value_a, value_b: $c.value_b,
+           source_a: $c.source_a, source_b: $c.source_b
+         };
+       };
        INSERT INTO platform_link {
          owner: $owner, contact: $id, platform: $link.platform,
          platform_id: $link.platform_id, last_synced_at: time::now()
-       } ON DUPLICATE KEY UPDATE
-         platform_id = $input.platform_id, last_synced_at = $input.last_synced_at;
+       } ON DUPLICATE KEY UPDATE last_synced_at = $input.last_synced_at;
        COMMIT;`,
-      {
-        owner,
-        id: recordId('contact', key),
-        link,
-        fields: {
-          first_name: fields.first_name ?? null,
-          last_name: fields.last_name ?? null,
-          display_name: fields.display_name,
-          company: fields.company ?? null,
-          job_title: fields.job_title ?? null,
-          is_financial_advisor: fields.is_financial_advisor ?? false,
-        },
-      }
+      vars
     )
     .collect()
+  return { filled, conflicts: conflicts.map((conflict) => conflict.field) }
 }
