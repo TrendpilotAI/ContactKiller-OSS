@@ -1,0 +1,11 @@
+# Review ownership for the files that gate what the public tracker may contain.
+# TrendpilotAI is the repository owner account (a user account, not an org, so
+# there are no teams to use).
+/.github/workflows/**           @TrendpilotAI
+/.github/CODEOWNERS             @TrendpilotAI
+/scripts/check-*                @TrendpilotAI
+/scripts/beads-expected-ids.sh  @TrendpilotAI
+/scripts/bd-push.sh             @TrendpilotAI
+/.beads/config.yaml             @TrendpilotAI
+/.beads/interactions.jsonl      @TrendpilotAI
+/PUBLIC_RELEASE_MANIFEST.json   @TrendpilotAI

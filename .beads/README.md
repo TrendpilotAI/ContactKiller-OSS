@@ -26,8 +26,8 @@ bd show <issue-id>
 bd update <issue-id> --claim
 bd update <issue-id> --status done
 
-# Sync with Dolt remote
-bd dolt push
+# Publish ticket data (only when authorised; see AGENTS.md)
+scripts/bd-push.sh
 ```
 
 ### Working with Issues
@@ -51,7 +51,7 @@ Issues in Beads are:
 - Fast, lightweight, and stays out of your way
 
 🔧 **Git Integration**
-- Dolt-native sync via bd dolt push / bd dolt pull
+- Dolt-native sync (in this repo, publish only with `scripts/bd-push.sh`; see AGENTS.md)
 - Branch-aware issue tracking
 - Dolt-native three-way merge resolution
 

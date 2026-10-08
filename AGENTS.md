@@ -39,7 +39,13 @@ see "Cursor hook" below for how to turn them off.
 
 ## Provenance
 
-Beads has no native `provenance.events`. This repo uses one fixed mapping:
+bd 1.3.1 does have a native provenance table (`bd provenance record`, `log`
+and `by-ref`; an append-only `provenance_events` table). **This repo does not
+use it, and `bd provenance record` is forbidden here.** The table is not part of
+`bd export`, `bd dolt push` would publish it with its full history, and nothing
+in the PR flow makes it reviewable. The export scan dumps `bd provenance log
+--json` for every ticket and fails if any row exists. Provenance instead uses
+this fixed mapping:
 
 | Fact | Where it lives |
 | --- | --- |
@@ -103,12 +109,28 @@ echo "{\"kind\":\"tool_call\",\"tool_name\":\"bd create\",\"issue_id\":\"$id\",\
   | bd audit record --stdin
 ```
 
-Follow-on work discovered while doing a ticket:
+Follow-on work discovered while doing a ticket (also log its creation event):
 
 ```bash
-bd create --title "..." --description "..." --deps discovered-from:<parent-id> \
-  --labels "factory:oss-example,agent:cloud-1,commit:abc1234"
+child=$(bd create --title "..." --description "...
+
+Provenance: factory=oss-example; agent=cloud-1; commit=abc1234" \
+  --deps discovered-from:<parent-id> \
+  --labels "factory:oss-example,agent:cloud-1,commit:abc1234" --silent)
+echo "{\"kind\":\"tool_call\",\"tool_name\":\"bd create\",\"issue_id\":\"$child\",\"exit_code\":0,\
+\"response\":\"created $child (discovered-from <parent-id>)\",\
+\"extra\":{\"factory\":\"oss-example\",\"agent\":\"cloud-1\",\"commit\":\"abc1234\"}}" \
+  | bd audit record --stdin
 ```
+
+**Audit entries are matched exactly by `tool_name`.** Every command that
+creates a ticket (`bd create` with any flags, `bd q`, `bd create --file` or
+`--graph`, and anything else that adds an issue) must be recorded as
+`"tool_name":"bd create"`, one entry per new ticket id. Every deletion must be
+recorded as `"tool_name":"bd delete"`, one entry per deleted id. The export scan
+fails if a published ticket has no `bd create` entry, so an unrecorded creation
+is caught even if the audit step was forgotten. Other event names (claim,
+close, and so on) are free-form.
 
 Record significant later events (claim, handoff, close, PR opened) the same way,
 with `--tool-name "<bd command>"` and the relevant `issue_id`.
@@ -119,7 +141,8 @@ above; do not repeat that.)
 ### Persistence and publishing
 
 Ticket data lives in the embedded Dolt database (`.beads/embeddeddolt/`, not
-committed). Share it with `bd dolt push` / `bd dolt pull`; it is stored under
+committed). Share it with `scripts/bd-push.sh` (publish) and `bd dolt pull`
+(fetch); it is stored under
 `refs/dolt/data` on the git remote, separate from branches (bd also keeps a
 marker branch `__dolt_remote_info__` there; do not delete it). On a fresh
 clone, run `bd bootstrap --yes` to fetch the tickets, then `git config
@@ -148,47 +171,68 @@ retracted.** That makes the following a hard rule:
 
 **What the scan does and does not prove.** `scripts/check-beads-export.sh` scans
 the current rows of `bd export --all` (issues, memories, infrastructure records,
-templates and gates) plus the audit log, using the same email, phone, Supabase,
-forbidden-content and private-identifier checks as
-`scripts/check-public-release.ts`, then gitleaks. It does **not** see the kv,
-config and events tables, nor the Dolt commit history. A green scan therefore
+templates and gates), the per-ticket output of `bd provenance log --json`, and
+the audit log, using the same email, phone, Supabase, forbidden-content and
+private-identifier checks as `scripts/check-public-release.ts`, then gitleaks.
+It does **not** see the kv, config and events tables, provenance rows of
+tickets that no longer exist, or the Dolt commit history. A green scan therefore
 does not prove that history is clean; only the rule above does.
 
 To publish ticket data, and only when the task or owner explicitly authorises
 it:
 
 1. Make sure no private detail was ever written to the tracker (the rule above).
-2. Push with `scripts/bd-push.sh` (not a bare `bd dolt push`). It runs
+2. Push with `scripts/bd-push.sh`, never a bare `bd dolt push`. It runs
    `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`, `gitleaks`)
    and only then `bd dolt push`. The scan is required, but it is a backstop, not
    permission to be careless.
 3. Never force-push, delete, or replace `refs/dolt/data`; `bd-push.sh` refuses
-   `--force`. Replacement is an owner-only decision.
+   `--force`, `--force=...` and short flag clusters containing `f`. Replacement
+   is an owner-only decision.
 
 CI runs the same scan on the published data in
 `.github/workflows/beads-export.yml` (a separate workflow so the daily run does
 not re-run the app jobs). It runs on pull requests, pushes to `main`, a daily
 schedule and manual dispatch, because a push to `refs/dolt/data` cannot trigger
-a workflow itself. It installs a checksum-pinned `bd` (with metrics off),
-bootstraps from the published tracker data on a clean checkout, exports with
-`bd export --all`, and runs `scripts/check-beads-export.sh`. It fails closed: a
-missing tool, a failed bootstrap or export, an existing local database in
-published mode, an empty export while tickets are expected, an expected ticket
-missing from the export, or any scanner error fails the job.
+a workflow itself. It installs a checksum-pinned `bd` (with metrics off) and
+runs `scripts/check-beads-export.sh` on a clean checkout. It fails closed: a
+missing tool, an existing local database in published mode, a `sync.remote` that
+is not `git+https://github.com/<owner>/<repo>`, a `.beads/metadata.json` that is
+not embedded Dolt, a bootstrap that did not sync-clone from that remote (for
+example a local import or a fresh init), a failed export, an empty export while
+tickets are expected, an expected ticket missing from the export, a published
+ticket with no `bd create` audit entry, any native provenance row, or any
+scanner error fails the job.
 
 - **Which tickets are expected.** Every `bd create` event in the audit log,
   except those whose latest event for that id is a `bd delete`. When you delete
   a ticket, record a `bd delete` audit entry for it (same `bd audit record`
-  form, `--tool-name "bd delete"`), or the scan will fail forever on the missing
+  form, `"tool_name":"bd delete"`), or the scan will fail forever on the missing
   ticket. A later `bd create` for the same id makes it expected again.
-- **Pull requests.** The expected set comes from the base branch's audit log,
-  not the PR's. A PR that records a new `bd create` is therefore not red just
-  because the ticket is not published yet; the PR's own audit log and the
-  published export are still scanned. After merge, the `main` run expects the
-  new ticket to be published.
-- **Append-only.** On pull requests the public-release job requires the base
-  branch's `.beads/interactions.jsonl` to be a byte prefix of the PR's
-  (`scripts/check-audit-append-only.sh`); a missing file on the base passes.
+- **Pull requests.** `bd create` events come from the base branch's audit log,
+  so a PR that records a new ticket is not red just because the ticket is not
+  published yet. `bd delete` events that the PR itself appends are also applied
+  (safe because the append-only check guarantees the PR's log extends the
+  base's), so a PR that deletes a published ticket is not red either. The PR's
+  own audit log and the published export are still scanned. After merge, the
+  `main` run expects new tickets to be published.
+- **Append-only.** The public-release job requires the previous revision's
+  `.beads/interactions.jsonl` to be a byte prefix of the new one
+  (`scripts/check-audit-append-only.sh`): on pull requests against
+  `github.event.pull_request.base.sha`, on pushes to `main` against
+  `github.event.before` (skipped for the all-zeros SHA of a new ref). A file
+  that is missing on the previous revision passes; a previous revision that is
+  not available in the clone fails.
+- **Failure alerts.** When a scheduled or manually dispatched run fails, the
+  `alert` job opens, or comments on, an open issue titled "Beads export scan
+  failing" that links to the run. It never copies scan output, since that may
+  contain the leaked value. Only that job has `issues: write`.
+- **Scheduled runs can go dormant.** GitHub disables scheduled workflows in a
+  public repository after 60 days without repository activity. If the daily scan
+  stops appearing in the Actions tab, re-enable it with
+  `gh workflow enable beads-export.yml` (or the "Enable workflow" button on the
+  workflow's page) and trigger one run with
+  `gh workflow run beads-export.yml`.
 
 ### Cursor hook (opt-in, local only)
 
@@ -261,6 +305,17 @@ cp -rf source dest          # NOT: cp -r source dest
 - `ssh` - use `-o BatchMode=yes` to fail instead of prompting
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+
+## Overrides of the generated Beads block
+
+The generated block below is standard Beads text and is stricter or looser than
+this repository in a few places. These repo rules win:
+
+- Do not run a bare `bd dolt push` (its Session Completion step lists one).
+  Publish ticket data only with `scripts/bd-push.sh`, and only when the task or
+  owner explicitly authorises it.
+- Do not use `bd provenance record`; see "Provenance".
+- In-session scratch todos and agent memory are allowed (see "Work Tracking").
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:46cd31e7 -->
 ## Beads Issue Tracker
