@@ -1,6 +1,14 @@
 {
   "schemaVersion": 3,
   "allowedFiles": [
+    ".agents/skills/beads/SKILL.md",
+    ".agents/skills/beads/agents/openai.yaml",
+    ".beads/.gitignore",
+    ".beads/README.md",
+    ".beads/config.yaml",
+    ".beads/interactions.jsonl",
+    ".beads/metadata.json",
+    ".cursor/rules/beads.mdc",
     ".github/ISSUE_TEMPLATE/adapter_proposal.yml",
     ".github/ISSUE_TEMPLATE/bug_report.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
@@ -9,7 +17,9 @@
     ".github/dependabot.yml",
     ".github/workflows/ci.yml",
     ".gitignore",
+    "AGENTS.md",
     "CHANGELOG.md",
+    "CLAUDE.md",
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "DESIGN.md",
@@ -49,6 +59,7 @@
     "examples/synthetic/README.md",
     "examples/synthetic/maya-chen-observations.json",
     "examples/synthetic/maya-chen.vcf",
+    "scripts/check-beads-export.sh",
     "scripts/check-public-release.ts",
     "scripts/forensic-cache.sql",
     "scripts/forensic-cache.test.ts",
@@ -125,6 +136,7 @@
     ".local/",
     ".claude/",
     ".codex/",
+    ".cursor/hooks.json",
     ".swarm/",
     ".worktrees/",
     "contact-audit-site/",
@@ -141,6 +153,9 @@
     ".sqlite",
     ".sqlite3",
     ".webarchive"
+  ],
+  "forbiddenExtensionExceptions": [
+    ".beads/interactions.jsonl"
   ],
   "allowedEmailDomains": [
     "example.com",

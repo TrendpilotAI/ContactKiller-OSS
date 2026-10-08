@@ -12,6 +12,7 @@ interface ReleaseManifest {
   requiredBinarySidecars: Record<string, string[]>;
   forbiddenPrefixes: string[];
   forbiddenExtensions: string[];
+  forbiddenExtensionExceptions?: string[];
   allowedEmailDomains: string[];
   maxFileSizeBytes: number;
   requiredVcardMarker: string;
@@ -23,6 +24,13 @@ interface Finding {
 }
 
 const root = resolve(import.meta.dir, "..");
+
+const scanExportIndex = process.argv.indexOf("--scan-export");
+const scanMode = scanExportIndex !== -1;
+const scanExportPaths = scanMode ? process.argv.slice(scanExportIndex + 1) : [];
+if (scanMode && scanExportPaths.length === 0) {
+  throw new Error("--scan-export requires at least one file path");
+}
 const manifestPath = "PUBLIC_RELEASE_MANIFEST.json";
 const manifest = JSON.parse(
   readFileSync(resolve(root, manifestPath), "utf8"),
@@ -47,6 +55,8 @@ function requireStringArray(name: keyof ReleaseManifest, value: unknown): assert
 requireStringArray("allowedFiles", manifest.allowedFiles);
 requireStringArray("forbiddenPrefixes", manifest.forbiddenPrefixes);
 requireStringArray("forbiddenExtensions", manifest.forbiddenExtensions);
+const forbiddenExtensionExceptions = manifest.forbiddenExtensionExceptions ?? [];
+requireStringArray("forbiddenExtensionExceptions", forbiddenExtensionExceptions);
 requireStringArray("allowedEmailDomains", manifest.allowedEmailDomains);
 
 if (
@@ -105,6 +115,11 @@ for (const path of reviewedBinaryPaths) {
     add(manifestPath, `reviewed binary digest must be lowercase SHA-256: ${path}`);
   }
 }
+for (const path of forbiddenExtensionExceptions) {
+  if (!manifest.allowedFiles.includes(path)) {
+    add(manifestPath, `forbidden-extension exception is not present in allowedFiles: ${path}`);
+  }
+}
 for (const path of duplicates(manifest.allowedFiles)) {
   add(manifestPath, `duplicate allowed path: ${path}`);
 }
@@ -139,6 +154,7 @@ if (expectedOrder.some((path, index) => path !== manifest.allowedFiles[index])) 
 const allowedFiles = new Set(manifest.allowedFiles);
 const reviewedBinaryDigests = new Map(Object.entries(manifest.reviewedBinaryDigests));
 const forbiddenExtensions = new Set(manifest.forbiddenExtensions.map((value) => value.toLowerCase()));
+const forbiddenExtensionExceptionPaths = new Set(forbiddenExtensionExceptions);
 const allowedEmailDomains = new Set(manifest.allowedEmailDomains.map((value) => value.toLowerCase()));
 
 if ([...reviewedBinaryPaths].sort(comparePaths).some((path, index) => path !== reviewedBinaryPaths[index])) {
@@ -175,7 +191,7 @@ function pathExistsWithoutFollowingLinks(path: string): boolean {
   }
 }
 
-const listed = execFileSync(
+const listed = scanMode ? [] : execFileSync(
   "git",
   ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
   { cwd: root, encoding: "utf8" },
@@ -187,7 +203,7 @@ const listed = execFileSync(
 const listedFiles = new Set(listed);
 
 for (const path of manifest.allowedFiles) {
-  if (!listedFiles.has(path)) add(path, "allowlisted public file is missing from the release tree");
+  if (!scanMode && !listedFiles.has(path)) add(path, "allowlisted public file is missing from the release tree");
 }
 for (const path of listed) {
   if (!allowedFiles.has(path)) add(path, "file is not in the exact public-release allowlist");
@@ -200,6 +216,51 @@ const domesticNanpPhonePattern =
 const supabaseProjectHostPattern = /\bhttps?:\/\/[a-z0-9]{20}\.supabase\.co(?:[/:?#]|$)/iu;
 const supabaseDashboardProjectPattern = /\bhttps?:\/\/(?:app\.)?supabase\.com\/(?:dashboard\/)?project\/[a-z0-9]{8,}(?:[/?#]|$)/iu;
 const supabaseProjectRefPattern = /\b(?:SUPABASE_PROJECT_REF|supabase[_-]?project[_-]?(?:id|ref)|project[_-]?ref)\s*[:=]\s*["']?[a-z0-9]{20}\b/iu;
+
+function scanTextContent(path: string, text: string): void {
+  if (supabaseProjectHostPattern.test(text)) {
+    add(path, "Supabase project-specific API URL detected");
+  }
+  if (supabaseDashboardProjectPattern.test(text)) {
+    add(path, "Supabase project-specific dashboard URL detected");
+  }
+  if (supabaseProjectRefPattern.test(text)) {
+    add(path, "Supabase project reference detected");
+  }
+
+  for (const match of text.matchAll(emailPattern)) {
+    const domain = match[1]?.toLowerCase();
+    if (domain && !allowedEmailDomains.has(domain)) {
+      add(path, `non-example email domain detected: ${domain}`);
+    }
+  }
+
+  const phoneCandidates = new Map<string, string>();
+  for (const pattern of [internationalPhonePattern, domesticNanpPhonePattern]) {
+    for (const match of text.matchAll(pattern)) {
+      const value = match[0].replace(/\s+/gu, " ").trim();
+      phoneCandidates.set(value.replace(/\D/gu, ""), value);
+    }
+  }
+  for (const value of phoneCandidates.values()) {
+    if (!isReservedExamplePhone(value)) {
+      add(path, "non-reserved phone-like value detected");
+    }
+  }
+}
+
+const selfPath = "scripts/check-public-release.ts";
+const privateIdentifierPatterns: Array<[RegExp, string]> = [
+  [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
+  [/GS-CK-/u, "private factory task id"],
+  [/grok-ship/iu, "private originating-agent name"],
+];
+
+function scanPrivateIdentifiers(path: string, text: string): void {
+  for (const [pattern, label] of privateIdentifierPatterns) {
+    if (pattern.test(text)) add(path, `${label} detected; public tickets must use opaque aliases`);
+  }
+}
 
 function isReservedExamplePhone(value: string): boolean {
   const digits = value.replace(/\D/gu, "");
@@ -286,7 +347,7 @@ for (const path of listed) {
     continue;
   }
   const extension = extname(path).toLowerCase();
-  if (forbiddenExtensions.has(extension)) {
+  if (forbiddenExtensions.has(extension) && !forbiddenExtensionExceptionPaths.has(path)) {
     add(path, `forbidden release extension ${extension}`);
   }
   if (stats.size > manifest.maxFileSizeBytes) {
@@ -325,41 +386,38 @@ for (const path of listed) {
     }
   }
 
-  if (supabaseProjectHostPattern.test(text)) {
-    add(path, "Supabase project-specific API URL detected");
-  }
-  if (supabaseDashboardProjectPattern.test(text)) {
-    add(path, "Supabase project-specific dashboard URL detected");
-  }
-  if (supabaseProjectRefPattern.test(text)) {
-    add(path, "Supabase project reference detected");
-  }
+  scanTextContent(path, text);
+  if (path !== selfPath) scanPrivateIdentifiers(path, text);
+}
 
-  for (const match of text.matchAll(emailPattern)) {
-    const domain = match[1]?.toLowerCase();
-    if (domain && !allowedEmailDomains.has(domain)) {
-      add(path, `non-example email domain detected: ${domain}`);
-    }
+for (const exportPath of scanExportPaths) {
+  const bytes = readFileSync(resolve(exportPath));
+  if (bytes.length === 0) {
+    add(exportPath, "export is empty");
+    continue;
   }
-
-  const phoneCandidates = new Map<string, string>();
-  for (const pattern of [internationalPhonePattern, domesticNanpPhonePattern]) {
-    for (const match of text.matchAll(pattern)) {
-      const value = match[0].replace(/\s+/gu, " ").trim();
-      phoneCandidates.set(value.replace(/\D/gu, ""), value);
-    }
+  if (bytes.length > manifest.maxFileSizeBytes) {
+    add(exportPath, `export exceeds the ${manifest.maxFileSizeBytes}-byte limit (${bytes.length} bytes)`);
+    continue;
   }
-  for (const value of phoneCandidates.values()) {
-    if (!isReservedExamplePhone(value)) {
-      add(path, "non-reserved phone-like value detected");
-    }
+  if (isProbablyBinary(bytes)) {
+    add(exportPath, "export contains binary content");
+    continue;
   }
+  const text = bytes.toString("utf8");
+  scanTextContent(exportPath, text);
+  scanPrivateIdentifiers(exportPath, text);
 }
 
 if (findings.length > 0) {
   console.error("Public-release check failed:\n");
   for (const finding of findings) console.error(`- ${finding.path}: ${finding.reason}`);
   process.exit(1);
+}
+
+if (scanMode) {
+  console.log(`Export scan passed for ${scanExportPaths.length} file(s).`);
+  process.exit(0);
 }
 
 console.log(

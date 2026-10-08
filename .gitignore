@@ -193,3 +193,15 @@ yarn-debug.log*
 .npmrc
 .yarnrc
 .tern-port
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Beads append-only audit log is tracked (see AGENTS.md "Provenance")
+!.beads/interactions.jsonl
+
+# Cursor Beads hook is an opt-in local file (see AGENTS.md)
+.cursor/hooks.json
