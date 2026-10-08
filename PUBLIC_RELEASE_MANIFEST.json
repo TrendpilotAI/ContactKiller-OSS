@@ -10,6 +10,7 @@
     ".github/dependabot.yml",
     ".github/workflows/ci.yml",
     ".gitignore",
+    ".gitleaksignore",
     "CHANGELOG.md",
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
