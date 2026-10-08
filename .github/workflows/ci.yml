@@ -89,7 +89,6 @@ jobs:
           SURREALDB_URL: http://127.0.0.1:8000
           SURREALDB_NAMESPACE: contactkiller
           SURREALDB_DATABASE: contactkiller
-          CONTACTKILLER_TOKEN_ENCRYPTION_KEY: c3ludGhldGljLWNpLXBsYWNlaG9sZGVyLWtleS0zMmI=
           GOOGLE_CLIENT_ID: synthetic-ci-placeholder
           GOOGLE_CLIENT_SECRET: synthetic-ci-placeholder
           NEXT_PUBLIC_APP_URL: http://localhost:3000
