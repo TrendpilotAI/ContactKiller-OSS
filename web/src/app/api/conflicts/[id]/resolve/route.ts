@@ -3,26 +3,30 @@ import { redirect } from 'next/navigation'
 import { InvalidRecordKeyError } from '@/lib/db/client'
 import { isChoice, resolveConflict } from '@/lib/db/conflicts'
 import { openSession, unauthorizedResponse } from '@/lib/db/session'
+import { MAX_FORM_BYTES, guardRequest, readLimitedFormData } from '@/lib/request-guard'
 
 // POST /api/conflicts/:id/resolve - Resolve a conflict
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const blocked = guardRequest(request)
+  if (blocked) return blocked
   const { id } = await params
 
-  const formData = await request.formData()
-  const choice = formData.get('choice')
+  const session = await openSession()
+  if (!session) return unauthorizedResponse()
+
+  const formData = await readLimitedFormData(request, MAX_FORM_BYTES)
+  const choice = formData?.get('choice')
 
   if (!isChoice(choice)) {
+    await session.close()
     return NextResponse.json(
       { error: 'Invalid choice. Must be "a", "b", or "skip"' },
       { status: 400 }
     )
   }
-
-  const session = await openSession()
-  if (!session) return unauthorizedResponse()
 
   let outcome
   try {

@@ -15,6 +15,8 @@ interface SyncResult {
   success: boolean
   imported?: number
   updated?: number
+  conflicts?: number
+  skipped?: string[]
   duplicates?: number
   total?: number
   error?: string
@@ -194,7 +196,7 @@ function SettingsContent() {
               <div className={`p-3 rounded-lg ${syncResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
                 {syncResult.success ? (
                   <p className="text-green-800 text-sm">
-                    Synced successfully! Imported: {syncResult.imported}, Updated: {syncResult.updated}
+                    Synced successfully! Imported: {syncResult.imported}, Updated: {syncResult.updated}, Conflicts to review: {syncResult.conflicts ?? 0}, Skipped as ambiguous: {syncResult.skipped?.length ?? 0}
                   </p>
                 ) : (
                   <p className="text-red-800 text-sm">{syncResult.error}</p>

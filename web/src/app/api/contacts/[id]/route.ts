@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { deleteContact, getContact, updateContact } from '@/lib/db/contacts'
 import { InvalidRecordKeyError } from '@/lib/db/client'
 import { withSession } from '@/lib/db/session'
+import { guardRequest } from '@/lib/request-guard'
 import { parseContactPatch } from '@/lib/contact-input'
 
 type RouteContext = { params: Promise<{ id: string }> }
@@ -26,14 +27,16 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
 
 // PATCH /api/contacts/:id - Update contact
 export async function PATCH(request: NextRequest, { params }: RouteContext) {
+  const blocked = guardRequest(request, { json: true })
+  if (blocked) return blocked
   const { id } = await params
-  const body = await request.json().catch(() => null)
-  const parsed = parseContactPatch(body)
-  if (!parsed.ok) {
-    return NextResponse.json({ error: parsed.error }, { status: 400 })
-  }
 
   return withSession(async ({ db }) => {
+    const parsed = parseContactPatch(await request.json().catch(() => null))
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 })
+    }
+
     try {
       if (!(await updateContact(db, id, parsed.value))) return notFound()
       return NextResponse.json(await getContact(db, id))
@@ -46,6 +49,8 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
 
 // DELETE /api/contacts/:id - Delete contact
 export async function DELETE(request: NextRequest, { params }: RouteContext) {
+  const blocked = guardRequest(request)
+  if (blocked) return blocked
   const { id } = await params
   return withSession(async ({ db }) => {
     try {

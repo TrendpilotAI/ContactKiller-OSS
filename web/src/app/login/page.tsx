@@ -1,18 +1,10 @@
 import Link from 'next/link'
 import { isSignupEnabled } from '@/lib/db/config'
 import { openSession } from '@/lib/db/session'
+import { safeNextPath } from '@/lib/safe-redirect'
 import { LoginForm } from './login-form'
 
 export const dynamic = 'force-dynamic'
-
-// Only same-origin absolute paths are honored, so the login screen cannot be
-// used as an open redirect.
-function safeNextPath(value: string | undefined): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
-    return '/contacts'
-  }
-  return value
-}
 
 export default async function LoginPage({
   searchParams,

@@ -1,30 +1,44 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
+import { guardRequest } from '@/lib/request-guard'
 import { getEncryptionKey } from '@/lib/db/crypto'
-import { getOAuthStatus, getOAuthToken } from '@/lib/db/oauth-tokens'
+import { getOAuthStatus } from '@/lib/db/oauth-tokens'
 import { withSession } from '@/lib/db/session'
 import { finishSyncLog, startSyncLog } from '@/lib/db/sync-logs'
 import { syncGoogleContacts } from '@/lib/sync/google'
+import { getUsableGoogleToken } from '@/lib/sync/google-token'
+
+const RECONNECT_BODY = {
+  error: 'Google token expired or unreadable. Please reconnect your Google account.',
+}
 
 // POST /api/sync/google - Sync contacts from Google
-export async function POST(): Promise<Response> {
+export async function POST(request: NextRequest): Promise<Response> {
+  const blocked = guardRequest(request)
+  if (blocked) return blocked
+
   return withSession(async ({ db, userId }) => {
-    // Get Google OAuth token
-    const tokenData = await getOAuthToken(db, getEncryptionKey(), userId, 'google')
+    // Get a usable Google token, refreshing it when it has expired
+    const token = await getUsableGoogleToken(db, getEncryptionKey(), userId)
 
-    if (!tokenData) {
-      return NextResponse.json(
-        { error: 'Google not connected. Please connect your Google account first.' },
-        { status: 400 }
-      )
-    }
-
-    // Check if token is expired
-    if (tokenData.expiresAt < new Date()) {
-      // TODO: Implement token refresh using refresh_token
-      return NextResponse.json(
-        { error: 'Google token expired. Please reconnect your Google account.' },
-        { status: 401 }
-      )
+    switch (token.status) {
+      case 'ok':
+        break
+      case 'not_connected':
+        return NextResponse.json(
+          { error: 'Google not connected. Please connect your Google account first.' },
+          { status: 400 }
+        )
+      case 'reconnect':
+        return NextResponse.json(RECONNECT_BODY, { status: 401 })
+      case 'refresh_unavailable':
+        return NextResponse.json(
+          { error: 'Could not refresh the Google token. Please try again.' },
+          { status: 502 }
+        )
+      default: {
+        const unreachable: never = token
+        return unreachable
+      }
     }
 
     // Log sync start
@@ -32,7 +46,7 @@ export async function POST(): Promise<Response> {
 
     try {
       // Run sync
-      const result = await syncGoogleContacts(db, userId, tokenData.accessToken)
+      const result = await syncGoogleContacts(db, userId, token.accessToken)
 
       // Log sync completion
       await finishSyncLog(db, syncLogId, {
@@ -46,6 +60,7 @@ export async function POST(): Promise<Response> {
         imported: result.imported,
         updated: result.updated,
         conflicts: result.conflicts,
+        skipped: result.skipped.length > 0 ? result.skipped : undefined,
         errors: result.errors.length > 0 ? result.errors : undefined,
       })
     } catch (err) {
@@ -74,12 +89,14 @@ export async function GET(): Promise<Response> {
     }
 
     const isExpired = status.expiresAt < new Date()
+    // An expired access token with a refresh token is renewed on the next sync.
+    const needsReauth = isExpired && !status.hasRefreshToken
 
     return NextResponse.json({
-      connected: !isExpired,
+      connected: !needsReauth,
       connectedAt: status.createdAt.toISOString(),
       expiresAt: status.expiresAt.toISOString(),
-      needsReauth: isExpired,
+      needsReauth,
     })
   })
 }

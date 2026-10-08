@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { guardRequest } from '@/lib/request-guard'
 import { AUTH_ERROR_MESSAGES, AuthError, signIn } from '@/lib/db/auth'
 import { getSurrealConfig } from '@/lib/db/config'
 import { setSessionCookie } from '@/lib/db/session'
 
 // POST /api/auth/signin - Exchange credentials for a SurrealDB session token
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export async function POST(request: NextRequest): Promise<Response> {
+  const blocked = guardRequest(request, { json: true })
+  if (blocked) return blocked
+
   const body = await request.json().catch(() => null)
   try {
     const token = await signIn(getSurrealConfig(), body?.email, body?.password)

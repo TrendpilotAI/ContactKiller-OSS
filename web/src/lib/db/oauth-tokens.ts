@@ -19,6 +19,16 @@ export interface StoredOAuthToken {
 export interface OAuthStatus {
   expiresAt: Date
   createdAt: Date
+  hasRefreshToken: boolean
+}
+
+// The stored ciphertext cannot be opened with the configured key: the key was
+// rotated, or the row was tampered with or moved. Recoverable by reconnecting.
+export class TokenDecryptError extends Error {
+  constructor() {
+    super('Stored provider token could not be decrypted.')
+    this.name = 'TokenDecryptError'
+  }
 }
 
 function context(owner: RecordId, provider: OAuthProvider, field: string): string {
@@ -76,21 +86,35 @@ export async function getOAuthToken(
     }[]]>()
   const row = rows[0]
   if (!row) return null
-  return {
-    accessToken: decryptSecret(row.access_token_enc, key, context(owner, provider, 'access')),
-    refreshToken: row.refresh_token_enc
-      ? decryptSecret(row.refresh_token_enc, key, context(owner, provider, 'refresh'))
-      : null,
-    expiresAt: row.expires_at.toDate(),
-    createdAt: row.created_at.toDate(),
+  try {
+    return {
+      accessToken: decryptSecret(row.access_token_enc, key, context(owner, provider, 'access')),
+      refreshToken: row.refresh_token_enc
+        ? decryptSecret(row.refresh_token_enc, key, context(owner, provider, 'refresh'))
+        : null,
+      expiresAt: row.expires_at.toDate(),
+      createdAt: row.created_at.toDate(),
+    }
+  } catch {
+    throw new TokenDecryptError()
   }
 }
 
 // Connection status never needs the secret, so it never decrypts.
 export async function getOAuthStatus(db: Db, provider: OAuthProvider): Promise<OAuthStatus | null> {
   const [rows] = await db
-    .query('SELECT expires_at, created_at FROM oauth_token WHERE provider = $provider', { provider })
-    .collect<[{ expires_at: DateTime; created_at: DateTime }[]]>()
+    .query(
+      `SELECT expires_at, created_at, refresh_token_enc != NONE AND refresh_token_enc != NULL AS has_refresh
+         FROM oauth_token WHERE provider = $provider`,
+      { provider }
+    )
+    .collect<[{ expires_at: DateTime; created_at: DateTime; has_refresh: boolean }[]]>()
   const row = rows[0]
-  return row ? { expiresAt: row.expires_at.toDate(), createdAt: row.created_at.toDate() } : null
+  return row
+    ? {
+        expiresAt: row.expires_at.toDate(),
+        createdAt: row.created_at.toDate(),
+        hasRefreshToken: row.has_refresh === true,
+      }
+    : null
 }

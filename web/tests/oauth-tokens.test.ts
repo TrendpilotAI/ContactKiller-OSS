@@ -63,6 +63,7 @@ describe.skipIf(!surrealAvailable)('OAuth token storage', () => {
   test('status needs no key and reports expiry', async () => {
     const status = await getOAuthStatus(alice.db, 'google')
     expect(status!.expiresAt.getTime()).toBeGreaterThan(Date.now())
+    expect(status!.hasRefreshToken).toBe(true)
     expect(await getOAuthStatus(alice.db, 'icloud')).toBeNull()
   })
 
