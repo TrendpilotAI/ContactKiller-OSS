@@ -197,10 +197,18 @@ const emailPattern = /[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})/giu;
 const internationalPhonePattern = /\+(?:[0-9][0-9 \t()./-]{6,}[0-9])/gu;
 const domesticNanpPhonePattern =
   /(?<![0-9A-Za-z])(?:1[ \t./-]*)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ \t./-]*[2-9][0-9]{2}[ \t./-]*[0-9]{4}(?![0-9A-Za-z])/gu;
+const supabaseProjectHostPattern = /\bhttps?:\/\/[a-z0-9]{20}\.supabase\.co(?:[/:?#]|$)/iu;
+const supabaseDashboardProjectPattern = /\bhttps?:\/\/(?:app\.)?supabase\.com\/(?:dashboard\/)?project\/[a-z0-9]{8,}(?:[/?#]|$)/iu;
+const supabaseProjectRefPattern = /\b(?:SUPABASE_PROJECT_REF|supabase[_-]?project[_-]?(?:id|ref)|project[_-]?ref)\s*[:=]\s*["']?[a-z0-9]{20}\b/iu;
 // The web prototype is SurrealDB-only. These identifiers only appear if a
 // Supabase client, environment variable, or hosted endpoint is reintroduced.
-const supabaseDependencyPattern =
-  /@supabase\/|\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*\b|\b[a-z0-9-]+\.supabase\.(?:co|com|io)\b/u;
+// Prose that mentions the product by name is allowed.
+const supabaseEnvVariablePattern = /\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*\b/u;
+const supabasePackageOrHostPattern = /@supabase\/|\bsupabase\.(?:co|com|io)\b/u;
+
+function mentionsSupabaseDependency(text: string): boolean {
+  return supabaseEnvVariablePattern.test(text) || supabasePackageOrHostPattern.test(text.toLowerCase());
+}
 
 function isReservedExamplePhone(value: string): boolean {
   const digits = value.replace(/\D/gu, "");
@@ -326,7 +334,16 @@ for (const path of listed) {
     }
   }
 
-  if (path !== "scripts/check-public-release.ts" && supabaseDependencyPattern.test(text)) {
+  if (supabaseProjectHostPattern.test(text)) {
+    add(path, "Supabase project-specific API URL detected");
+  }
+  if (supabaseDashboardProjectPattern.test(text)) {
+    add(path, "Supabase project-specific dashboard URL detected");
+  }
+  if (supabaseProjectRefPattern.test(text)) {
+    add(path, "Supabase project reference detected");
+  }
+  if (path !== "scripts/check-public-release.ts" && mentionsSupabaseDependency(text)) {
     add(path, "Supabase client, environment variable, or endpoint reference detected");
   }
 
