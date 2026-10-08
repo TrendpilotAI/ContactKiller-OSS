@@ -57,6 +57,9 @@ if [ "$mode" = published ]; then
     exit 1
   fi
 
+  jq -e '.backend == "dolt" and .dolt_mode == "embedded"' .beads/metadata.json >/dev/null \
+    || { echo ".beads/metadata.json must select the embedded Dolt backend" >&2; exit 1; }
+
   # The committed config decides where bootstrap fetches from; a PR must not be
   # able to point it at a different (clean-looking) remote.
   expected_remote="git+https://github.com/${GITHUB_REPOSITORY:-TrendpilotAI/ContactKiller-OSS}"
@@ -67,8 +70,6 @@ if [ "$mode" = published ]; then
     echo "  found:    $configured_remote" >&2
     exit 1
   fi
-  jq -e '.backend == "dolt" and .dolt_mode == "embedded"' .beads/metadata.json >/dev/null \
-    || { echo ".beads/metadata.json must select the embedded Dolt backend" >&2; exit 1; }
 
   bootstrap_log="$(mktemp)"
   bd bootstrap --yes 2>&1 | tee "$bootstrap_log"
