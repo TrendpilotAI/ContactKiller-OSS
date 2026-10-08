@@ -51,13 +51,14 @@ export function getSurrealConfig(env: Env = process.env): SurrealConfig {
 // Root credentials are only for provisioning (migrations, local compose). The
 // web runtime never reads them.
 export function getSurrealAdminConfig(env: Env = process.env): SurrealAdminConfig {
+  const user = required(env, 'SURREALDB_ROOT_USER')
   const password = required(env, 'SURREALDB_ROOT_PASSWORD')
   if (/^replace-with/i.test(password)) {
     throw new Error('SURREALDB_ROOT_PASSWORD is still a placeholder. Set a real local password in compose.env.')
   }
   return {
     ...getSurrealConfig(env),
-    user: required(env, 'SURREALDB_ROOT_USER'),
+    user,
     password,
   }
 }

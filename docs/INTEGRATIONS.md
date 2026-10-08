@@ -4,7 +4,7 @@ Every provider is described on four axes: read, write, provenance, and proof. A 
 
 | Integration | Read/import | Write/export | Provenance | Status |
 | --- | --- | --- | --- | --- |
-| Google Contacts | Experimental one-way People API import | No | Provider IDs and ContactKiller user ownership in prototype | Multiple Google accounts per user, token refresh, incremental sync, and production proof incomplete |
+| Google Contacts | Experimental one-way People API import | No | Provider IDs and ContactKiller user ownership in prototype | Multiple Google accounts per user, live-verified token refresh, incremental sync, and production proof incomplete |
 | iCloud / Apple Contacts | Manual vCard upload | No | Import source recorded in prototype | No CardDAV or native Contacts adapter |
 | Mesh | Bounded `searchContacts` snapshot | No | Exact result stored in ignored owner-only local snapshot | Research-only; no continuous sync |
 | HubSpot | No live adapter | No | Provider type/design only | Planned read-only adapter |

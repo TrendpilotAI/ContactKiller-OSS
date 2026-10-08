@@ -22,6 +22,11 @@ describe('SurrealDB configuration', () => {
     expect(
       getSurrealAdminConfig({ SURREALDB_ROOT_USER: 'root', SURREALDB_ROOT_PASSWORD: 'pw' })
     ).toMatchObject({ user: 'root', password: 'pw' })
+    // compose.env.example ships an empty password so nobody runs with a default.
+    expect(() => getSurrealAdminConfig({ SURREALDB_ROOT_USER: 'root', SURREALDB_ROOT_PASSWORD: '' })).toThrow('SURREALDB_ROOT_PASSWORD')
+    expect(() =>
+      getSurrealAdminConfig({ SURREALDB_ROOT_USER: 'root', SURREALDB_ROOT_PASSWORD: 'replace-with-a-local-development-password' })
+    ).toThrow('placeholder')
   })
 
   test('sign-up is opt-in', () => {

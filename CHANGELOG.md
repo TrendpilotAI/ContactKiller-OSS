@@ -10,6 +10,9 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 
 - The web prototype now persists to SurrealDB. Accounts and sessions use SurrealDB record access, tenant isolation is enforced by owner-scoped table permissions, and provider OAuth tokens are encrypted by the application before storage. Supabase was removed; a `/login` screen was added because the prototype previously relied on an externally established session.
 - Replaced the Postgres migrations in `web/supabase/` with SurrealQL migrations in `web/surreal/migrations/` and a local SurrealDB `compose.yaml`.
+- Google import now matches only on exact identifiers and never overwrites: it fills empty fields, files conflicts for differences, leaves `is_financial_advisor` and existing Google links alone, and skips ambiguous matches.
+- Google sync refreshes expired access tokens from the stored refresh token.
+- Sign-up is off by default and enforced by the database; every state-changing route checks the request origin.
 
 ### Fixed
 

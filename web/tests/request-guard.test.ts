@@ -18,7 +18,7 @@ describe('origin check', () => {
   })
 
   test('rejects other origins, "null", look-alikes, and requests with neither header', async () => {
-    for (const headers of [
+    const hostile: Record<string, string>[] = [
       { origin: 'https://evil.example' },
       { origin: 'null' },
       { origin: 'http://localhost:3000.evil.example' },
@@ -27,7 +27,8 @@ describe('origin check', () => {
       { referer: 'https://evil.example/http://localhost:3000' },
       { referer: 'not a url' },
       {},
-    ]) {
+    ]
+    for (const headers of hostile) {
       const response = checkOrigin(post(headers), env)
       expect(response?.status).toBe(403)
     }

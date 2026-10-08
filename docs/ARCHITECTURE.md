@@ -38,7 +38,7 @@ ContactKiller is designed around one boundary: source systems remain evidence, w
 ## Current default-branch implementation
 
 - The Next.js prototype uses SurrealDB for accounts and sessions (record access), mutable contacts, source/account labels, encrypted OAuth tokens, sync logs, and conflicts. Owner-scoped table permissions enforce tenant isolation in the database. It does not preserve exact raw source payloads or append-only observations for every import.
-- Google import can update an existing contact's mutable fields. iCloud import can treat a matching record as a duplicate and skip it. These paths are one-way prototype importers, not evidence-preserving reconciliation.
+- Google import fills empty fields on an exactly matched contact and files conflicts for differing values, without overwriting local values. iCloud import can treat a matching record as a duplicate and skip it. These paths are one-way prototype importers, not evidence-preserving reconciliation.
 - The local DuckDB cache supports rebuildable research joins and summaries.
 - The ActiveGraph pack models manifests, observations, canonical identities, proposals, tasks, approvals, and events independently of the web application.
 - No production provider-mutation gateway exists.

@@ -14,7 +14,7 @@ SurrealDB backs the web prototype's mutable application state and is the experim
 
 The web prototype (`web/`) is SurrealDB-only. It replaces the earlier hosted-Postgres persistence layer, which no longer exists in this tree. What ships:
 
-- a record access method for sign-up and sign-in, with argon2 password hashes;
+- a record access method for sign-up and sign-in, with argon2 password hashes and a database-side sign-up switch that is off by default;
 - schemafull tables for users, contacts, emails, phones, platform links, conflicts, sync logs, and OAuth tokens, each carrying a read-only `owner` and an `owner = $auth` permission clause, with cascade deletes from contacts to their children;
 - AES-256-GCM encryption of provider tokens in the application before storage;
 - numbered SurrealQL migrations with checksums, transactional apply, and rollback files; and

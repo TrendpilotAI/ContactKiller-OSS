@@ -41,7 +41,7 @@ The repository is intentionally candid about maturity:
 | Area | Status | Notes |
 | --- | --- | --- |
 | Contact explorer and CRUD API | Implemented prototype | SurrealDB-backed interface and routes; not production-proven. |
-| Google Contacts | Experimental | Read-only OAuth scope and one-way import; token refresh and write-back are incomplete. |
+| Google Contacts | Experimental | Read-only OAuth scope and one-way import with exact-identifier matching; access tokens refresh from the stored refresh token (not yet verified against live Google); write-back is not implemented. |
 | iCloud | Experimental | Manual vCard import; no CardDAV sync. |
 | Mesh | Research connector | Bounded, read-only snapshot path into owner-only local storage. |
 | ActiveGraph | Experimental foundation | Typed reconciliation objects, approval routing, replay, and runtime tests. Not the live production authority. |
@@ -115,13 +115,14 @@ cp .env.local.example .env.local      # placeholders only; set your own encrypti
 cp compose.env.example compose.env    # then set a local SurrealDB root password
 bun install
 docker compose --env-file compose.env up -d --wait   # SurrealDB on 127.0.0.1:8000
-bun run db:migrate                                   # apply web/surreal/migrations
+# For the first account only: set CONTACTKILLER_ALLOW_SIGNUP=true in .env.local
+bun run db:migrate                                   # apply migrations, sync the sign-up switch
 bun run dev
 ```
 
-Open <http://localhost:3000/login>, create a local account (sign-up is enabled by `CONTACTKILLER_ALLOW_SIGNUP=true` in the example environment), and import a synthetic vCard from **Settings**. `.env.local` needs `CONTACTKILLER_TOKEN_ENCRYPTION_KEY`; generate one with `openssl rand -base64 32`. To exercise Google import, create a development OAuth web client and register `http://localhost:3000/api/auth/google/callback` (or the matching `NEXT_PUBLIC_APP_URL`) as its redirect URI.
+Open <http://localhost:3000/login>, create a local account, and import a synthetic vCard from **Settings**. `.env.local` needs `CONTACTKILLER_TOKEN_ENCRYPTION_KEY`; generate one with `openssl rand -base64 32`. To exercise Google import, create a development OAuth web client and register `http://localhost:3000/api/auth/google/callback` (or the matching `NEXT_PUBLIC_APP_URL`) as its redirect URI.
 
-Accounts, sessions, and row-level ownership are enforced by SurrealDB itself; the web app never holds database root credentials. Use synthetic fixtures and a development database; do not reuse production credentials or personal contact exports, and never expose the SurrealDB port beyond loopback. See [Development](docs/DEVELOPMENT.md) for tests and troubleshooting.
+Sign-up is off by default and is enforced inside SurrealDB, not only in the app: the database's sign-up clause refuses to run unless `setting:signup` is on, and `bun run db:migrate` sets it from `CONTACTKILLER_ALLOW_SIGNUP`. To create the first user, set the variable to `true`, run `bun run db:migrate`, restart the dev server, sign up on `/login`, then set it back to `false` and run `bun run db:migrate` again. Accounts, sessions, and row-level ownership are likewise enforced by SurrealDB itself; the web app never holds database root credentials. Use synthetic fixtures and a development database; do not reuse production credentials or personal contact exports, and never expose the SurrealDB port beyond loopback. See [Development](docs/DEVELOPMENT.md) for tests and troubleshooting.
 
 ### ActiveGraph pack
 
