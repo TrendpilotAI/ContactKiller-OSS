@@ -171,39 +171,71 @@ retracted.** That makes the following a hard rule:
 
 **What the scan does and does not prove.** `scripts/check-beads-export.sh` scans
 the current rows of `bd export --all` (issues, memories, infrastructure records,
-templates and gates), the per-ticket output of `bd provenance log --json`, and
-the audit log, using the same email, phone, Supabase, forbidden-content,
+templates and gates), the per-ticket output of `bd provenance log --json`, the
+config table's values, dumps of the synced tables listed below, and the audit
+log, using the same email, phone, Supabase, forbidden-content,
 private-identifier, machine-path and secret-pattern checks as
-`scripts/check-public-release.ts`, then gitleaks. Before trusting the export it
-also fails if an export owner exclusion or a directory label filter is
-configured anywhere: `export.exclude_owner*` or `directory.label*` in
-`.beads/config.yaml` (nested or dotted, including a `directory:` map, which
-`bd config get` cannot see), in the environment, or as a row of the Dolt config
-table (read with `bd config list --json`; `bd config get` never reads that
-table, yet `bd export` does, and it travels with `refs/dolt/data`). It then
-requires the export to match what `bd list --all --limit 0 --skip-labels`
-shows (read from its `{issues, meta, schema_version}` envelope; any other shape
-fails): same record count before de-duplication, no duplicate ids on either
-side, and the same id, status and `updated_at` per record. `bd export`
-silently drops excluded owners, and a bare `bd list` silently applies
-`directory.labels`, which would let a scan pass on an empty or partial export
-while a push still publishes everything. It also fails if any scanned file contains a gitleaks
-allow comment, which would suppress findings. It does **not** see the kv, config and events tables, provenance rows of
-tickets that no longer exist, or the Dolt commit history. A green scan therefore
-does not prove that history is clean; only the rule above does.
+`scripts/check-public-release.ts`, then gitleaks. It needs `bd`, `jq`, `bun`,
+`git`, gitleaks 8.30.x and the standalone `dolt` CLI, and fails if any is
+missing.
+
+Before trusting the export it also fails if:
+
+- an export owner exclusion or a directory label filter is configured anywhere:
+  `export.exclude_owner*` or `directory.label*` in `.beads/config.yaml` (nested
+  or dotted, including a `directory:` map, which `bd config get` cannot see), in
+  the environment, or as a row of the Dolt config table (read with
+  `bd config list --json`; `bd config get` never reads that table, yet
+  `bd export` does, and it travels with `refs/dolt/data`);
+- `dolt.auto-push` is enabled in `config.yaml`, `config.local.yaml` (nested or
+  dotted), the environment (`BD_DOLT_AUTO_PUSH`) or the Dolt config table, or is
+  mentioned at all in the committed `.beads/config.yaml`. With it on, every bd
+  write pushes to the public remote by itself, bypassing `scripts/bd-push.sh`
+  and every scan. The guard runs before the first bd command that could write,
+  in published mode, in `--local` mode and in `bd-push.sh`;
+- the export does not match what `bd list --all --limit 0 --skip-labels` shows
+  (read from its `{issues, meta, schema_version}` envelope; any other shape
+  fails): same record count before de-duplication, no duplicate ids on either
+  side, and the same id, status and `updated_at` per record. `bd export`
+  silently drops excluded owners, and a bare `bd list` silently applies
+  `directory.labels`, which would let a scan pass on an empty or partial export
+  while a push still publishes everything;
+- any scanned file contains a gitleaks allow comment. Gitleaks itself also runs
+  with `--ignore-gitleaks-allow`, with `-i` pointing at an empty temporary file
+  (so a repository `.gitleaksignore` can never suppress a finding on ticket
+  data), and without `GITLEAKS_CONFIG*` overrides; and `bd-push.sh` requires
+  gitleaks 8.30.x;
+- one of the synced tables below is not empty (see next paragraph).
+
+**Synced tables outside the export.** `bd dolt push` publishes whole tables that
+`bd export` does not contain: `issue_snapshots`, `compaction_snapshots`,
+`federation_peers`, `interactions` (the Dolt table, not the audit log file),
+`routes`, `metadata`, `custom_types` and `custom_statuses`. The scan reads them
+with the `dolt` CLI. Every one of them except `metadata` must be empty, and
+`metadata` may hold only bd's own bookkeeping keys (`_project_id`, `clone_id`,
+`last_import_time`, `repo_id`); anything else fails the scan. Their contents are
+also dumped into the scan directory and run through the scanners and gitleaks.
+
+**Not covered.** The kv and events tables, the lease, wisp and counter tables,
+provenance rows of tickets that no longer exist, and the Dolt commit history are
+published but not read. Dolt history is not scanned from inside bd (it could be
+walked with the `dolt` CLI, which nothing here does yet), so a green scan does
+not prove that history is clean; only the rule above does.
 
 To publish ticket data, and only when the task or owner explicitly authorises
 it:
 
 1. Make sure no private detail was ever written to the tracker (the rule above).
 2. Push with `scripts/bd-push.sh`, never a bare `bd dolt push`. It runs
-   the following, in order (needs `bd`, `jq`, `bun`, `gitleaks`): require a
+   the following, in order (needs `bd`, `jq`, `bun`, gitleaks 8.30.x and
+   `dolt`): refuse `dolt.auto-push` and a wrong gitleaks version before running
+   any bd command that could write, then require a
    clean Dolt working set (`bd dolt commit` must print "Nothing to commit."; if
    it commits pending changes the push aborts so you can review and re-run),
    record Dolt HEAD (`bd vc status --json`) and a digest of `bd export --all`,
    run the one full content scan (`scripts/check-public-release.ts`,
-   `scripts/check-beads-export.sh --local` with its guards and gitleaks, and the
-   allow-comment check on `.beads`), then re-check that the working set is still
+   `scripts/check-beads-export.sh --local` with its guards, synced-table check
+   and gitleaks, and the allow-comment check on `.beads`), then re-check that the working set is still
    clean, HEAD is unchanged and the export digest is identical, and only then
    run `bd dolt push --no-adopt`. Content that changes between the scan and the
    push therefore aborts it. The remaining window is the few milliseconds
@@ -222,15 +254,18 @@ CI runs the same scan on the published data in
 `.github/workflows/beads-export.yml` (a separate workflow so the daily run does
 not re-run the app jobs). It runs on pull requests, pushes to `main`, a daily
 schedule and manual dispatch, because a push to `refs/dolt/data` cannot trigger
-a workflow itself. It installs a checksum-pinned `bd` (with metrics off) and
+a workflow itself. It installs a checksum-pinned `bd` (with metrics off), gitleaks
+and `dolt` and
 runs `scripts/check-beads-export.sh` on a clean checkout. It fails closed: a
 missing tool, an existing local database in published mode, a `sync.remote` that
 is not `git+https://github.com/<owner>/<repo>`, a `.beads/metadata.json` that is
-not embedded Dolt, a bootstrap that did not sync-clone from that remote (for
-example a local import or a fresh init), a failed export, an empty export while
+not embedded Dolt, a bootstrap whose output lacks the exact line
+`Synced database from <that remote>` (for example a local import or a fresh
+init), a failed export, an empty export while
 tickets are expected, an expected ticket missing from the export, a published
-ticket with no `bd create` audit entry, any native provenance row, or any
-scanner error fails the job.
+ticket with no `bd create` audit entry, any native provenance row, a non-empty
+synced table, `dolt.auto-push` enabled anywhere, or any scanner error fails the
+job.
 
 - **Which tickets are expected.** Every `bd create` event in the audit log,
   except those whose latest event for that id is a `bd delete`. When you delete
