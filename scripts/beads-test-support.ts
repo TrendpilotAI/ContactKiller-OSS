@@ -19,7 +19,10 @@ export function isolatedEnv(home: string): NodeJS.ProcessEnv {
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
   };
-  for (const name of ["BD_DOLT_AUTO_PUSH", "GH_TOKEN", "GITHUB_TOKEN", "BEADS_DIR", "BEADS_DB"]) delete env[name];
+  // CI exports BEADS_AUDIT_BASELINE (and the like) for pull_request runs; none of it may leak into a test workspace.
+  for (const name of ["BD_DOLT_AUTO_PUSH", "GH_TOKEN", "GITHUB_TOKEN", "BEADS_DIR", "BEADS_DB", "BEADS_AUDIT_BASELINE", "GITHUB_REPOSITORY"]) {
+    delete env[name];
+  }
   return env;
 }
 
