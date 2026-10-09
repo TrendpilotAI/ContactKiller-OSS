@@ -51,7 +51,7 @@ pytest
 
 ### Persistence and replay
 
-The web prototype's SurrealDB layer is covered by `web/tests/` against a real in-memory server: record auth and the database-side sign-up gate, owner-scoped permissions, exact-match importer rules, origin/content-type guards, token refresh, transactional writes, cascade deletes, migration checksums and rollback, ciphertext-only token storage, and importer idempotency. Append-only replay, restoration from backup, and concurrent-writer tests are still open.
+The web prototype's SurrealDB layer is covered by `web/tests/` against a real in-memory server: record auth and the database-side sign-up gate, owner-scoped permissions, exact-match importer rules, origin/content-type guards, token refresh, concurrent-sync and unique-link behavior, bounded request bodies, GCM tag pinning, transactional writes, cascade deletes, migration checksums and rollback, ciphertext-only token storage, and importer idempotency. Append-only replay, restoration from backup, and concurrent-writer tests are still open.
 
 - append-only event behavior;
 - deterministic replay;

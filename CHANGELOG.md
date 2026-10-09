@@ -12,7 +12,8 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 - Replaced the Postgres migrations in `web/supabase/` with SurrealQL migrations in `web/surreal/migrations/` and a local SurrealDB `compose.yaml`.
 - Google import now matches only on exact identifiers and never overwrites: it fills empty fields, files conflicts for differences, leaves `is_financial_advisor` and existing Google links alone, and skips ambiguous matches.
 - Google sync refreshes expired access tokens from the stored refresh token.
-- Sign-up is off by default and enforced by the database; every state-changing route checks the request origin.
+- Sign-up is off by default and enforced by the database (rolling the gate back leaves it closed); every state-changing route checks the request origin, and JSON bodies are size-capped.
+- A provider identity is unique per user. Google contacts that share an email are imported separately and flagged for review rather than skipped or merged.
 
 ### Fixed
 
