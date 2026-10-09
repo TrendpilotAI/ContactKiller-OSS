@@ -7,6 +7,17 @@
 #                                          bd lists, ignoring those filters
 #   beads-guard.sh no-allow <dir>          nothing in <dir> carries a gitleaks
 #                                          allow comment
+#   beads-guard.sh autopush-files          dolt.auto-push is not enabled in
+#                                          config.yaml, config.local.yaml or the
+#                                          environment (usable before bootstrap)
+#   beads-guard.sh gitleaks-version        gitleaks is 8.30.x
+#   beads-guard.sh gitleaks <dir>          run gitleaks 8.30.x on <dir> with
+#                                          every suppression mechanism disabled
+#   beads-guard.sh synced-tables <dir>     the Dolt tables `bd dolt push`
+#                                          publishes but the export does not
+#                                          contain are empty (metadata: only
+#                                          expected keys); dumps them into <dir>
+#                                          for scanning. Needs the dolt CLI.
 #
 # Why: `bd export` silently drops issues whose creator matches
 # export.exclude_owner / export.exclude_owners, and a bare `bd list` silently
@@ -17,11 +28,69 @@
 # is the backstop for anything else that makes the export differ from what bd
 # lists; it cannot see a filter that also hides records from `bd list` itself,
 # which is why the config guard rejects the keys outright.
+#
+# dolt.auto-push makes every bd write push to the public remote on its own,
+# bypassing scripts/bd-push.sh and every scan, so it must be off in every source
+# (config.yaml, config.local.yaml, the environment, the config table); the
+# committed config.yaml must not mention it at all.
 set -euo pipefail
+
+# Is this config value one of the spellings that mean "off"?
+is_off() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    ""|false|0|no|off|n|f) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+autopush_files() {
+  local yaml key value
+  yaml="${BEADS_DIR:-.beads}/config.yaml"
+  # The committed config must not carry the knob at all, even as false.
+  if [ -f "$yaml" ] && sed 's/#.*//' "$yaml" | grep -qiE 'auto[-_]push'; then
+    echo "$yaml mentions dolt.auto-push; the committed config must not set it (every bd write would push publicly)." >&2
+    exit 1
+  fi
+  # config.yaml, config.local.yaml (nested or dotted) and the environment, as bd reads them.
+  for key in dolt.auto-push dolt.auto_push; do
+    value="$(bd config get "$key")"
+    case "$value" in
+      "$key (not set"*) ;;
+      *)
+        if ! is_off "$value"; then
+          echo "$key is enabled (config.yaml, config.local.yaml or the environment); every bd write would push to the public remote." >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+  if ! is_off "${BD_DOLT_AUTO_PUSH:-}"; then
+    echo "BD_DOLT_AUTO_PUSH is set in the environment; every bd write would push to the public remote." >&2
+    exit 1
+  fi
+}
+
+autopush_table() {
+  local table keys
+  table="$1"
+  keys="$(printf '%s' "$table" | jq -r 'to_entries[] | select(.key | test("^dolt\\.auto[-_]push"; "i")) | "\(.key)\t\(.value)"')"
+  while IFS=$'\t' read -r key value; do
+    [ -n "$key" ] || continue
+    if ! is_off "$value"; then
+      echo "the Dolt config table enables $key; every bd write would push to the public remote (it travels with refs/dolt/data)." >&2
+      exit 1
+    fi
+  done <<<"$keys"
+}
 
 cmd="${1:-}"
 case "$cmd" in
+  autopush-files)
+    autopush_files
+    ;;
+
   config)
+    autopush_files
     bad_key='^(export\.exclude_owner|directory\.label)'
     # YAML and environment (`bd config get` prints "<key> (not set ...)" when unset).
     for key in export.exclude_owner export.exclude_owners directory.labels directory.label; do
@@ -47,6 +116,7 @@ case "$cmd" in
     table="$(bd config list --json)"
     printf '%s' "$table" | jq -e 'type == "object"' >/dev/null \
       || { echo "unexpected output from 'bd config list --json'; refusing to continue" >&2; exit 1; }
+    autopush_table "$table"
     table_keys="$(printf '%s' "$table" | jq -r --arg re "$bad_key" 'keys[] | select(test($re; "i"))')"
     if [ -n "$table_keys" ]; then
       echo "the Dolt config table holds a key that would silently filter the export or the listing:" >&2
@@ -109,8 +179,60 @@ case "$cmd" in
     esac
     ;;
 
+  gitleaks-version)
+    version="$(gitleaks version 2>/dev/null || true)"
+    case "$version" in
+      8.30.*) ;;
+      *) echo "gitleaks 8.30.x is required (found: ${version:-none})" >&2; exit 1 ;;
+    esac
+    ;;
+
+  gitleaks)
+    dir="${2:?usage: $0 gitleaks <dir>}"
+    "$0" gitleaks-version
+    # No environment-provided rules, and an empty ignore file, so neither a
+    # config override nor a .gitleaksignore can suppress findings on ticket data.
+    unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+    empty_ignore="$(mktemp)"
+    trap 'rm -f "$empty_ignore"' EXIT
+    gitleaks dir "$dir" --redact --no-banner --ignore-gitleaks-allow -i "$empty_ignore"
+    ;;
+
+  synced-tables)
+    dir="${2:?usage: $0 synced-tables <dir>}"
+    command -v dolt >/dev/null 2>&1 || { echo "the dolt CLI is required to check the synced tables" >&2; exit 1; }
+    db="$(jq -er '.dolt_database' "${BEADS_DIR:-.beads}/metadata.json")"
+    case "$db" in
+      ""|*[!A-Za-z0-9_-]*) echo "unexpected dolt_database name in metadata.json" >&2; exit 1 ;;
+    esac
+    store="${BEADS_DIR:-.beads}/embeddeddolt/$db"
+    [ -d "$store" ] || { echo "no embedded Dolt store at $store" >&2; exit 1; }
+    mkdir -p "$dir/synced-tables"
+    # Published by `bd dolt push` but not part of `bd export`; policy is to leave them empty.
+    for table in issue_snapshots compaction_snapshots federation_peers interactions routes custom_types custom_statuses; do
+      out="$dir/synced-tables/$table.json"
+      (cd "$store" && dolt sql -r json -q "SELECT * FROM \`$table\`") > "$out"
+      rows="$(jq '(.rows // []) | length' "$out")"
+      if [ "$rows" -ne 0 ]; then
+        echo "synced table $table holds $rows row(s); this repo expects it to stay empty (see AGENTS.md)" >&2
+        exit 1
+      fi
+    done
+    # metadata: bd's own bookkeeping keys only.
+    out="$dir/synced-tables/metadata.json"
+    (cd "$store" && dolt sql -r json -q "SELECT * FROM metadata") > "$out"
+    unexpected="$(jq -r '(.rows // [])[] | .key | select(. as $k | ["_project_id","clone_id","last_import_time","repo_id"] | index($k) | not)' "$out")"
+    if [ -n "$unexpected" ]; then
+      echo "synced table metadata holds unexpected key(s):" >&2
+      printf '  %s\n' $unexpected >&2
+      exit 1
+    fi
+    # The config table's values are scanned too (its keys are policed by the config guard).
+    bd config list --json > "$dir/synced-tables/config.json"
+    ;;
+
   *)
-    echo "usage: $0 config | listing <export-file> | no-allow <dir>" >&2
+    echo "usage: $0 config | autopush-files | listing <export-file> | no-allow <dir> | gitleaks-version | gitleaks <dir> | synced-tables <dir>" >&2
     exit 2
     ;;
 esac

@@ -325,3 +325,246 @@ describe("beads-guard.sh listing with a stubbed bd", () => {
     });
   });
 });
+
+describe.skipIf(!hasBd)("beads-guard.sh refuses dolt.auto-push from every source", () => {
+  // No Dolt remote is configured in these throwaway workspaces, so even a
+  // successful "enable" can never push anywhere.
+  function workspace(dir: string): { ws: string; env: NodeJS.ProcessEnv } {
+    const env = {
+      ...process.env,
+      HOME: dir,
+      DO_NOT_TRACK: "1",
+      BD_NON_INTERACTIVE: "1",
+      BEADS_ACTOR: "tester",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+    };
+    delete env.BD_DOLT_AUTO_PUSH;
+    const ws = join(dir, "ws");
+    mkdirSync(ws);
+    const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: ws, env, stdio: "pipe" });
+    run("git", ["init", "-q"]);
+    run("git", ["config", "user.email", "owner@example.com"]);
+    run("git", ["config", "user.name", "t"]);
+    run("bd", ["init", "--non-interactive", "--prefix", "t", "--skip-hooks", "--skip-agents"]);
+    return { ws, env };
+  }
+  const run = (ws: string, env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync(guard, args, { cwd: ws, env, encoding: "utf8" });
+
+  test("an unconfigured workspace passes", () => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      expect(run(ws, env, "autopush-files").status).toBe(0);
+      expect(run(ws, env, "config").status).toBe(0);
+    });
+  });
+
+  test("enabled in the committed config.yaml fails, and so does any mention of it", () => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      const config = join(ws, ".beads/config.yaml");
+      const original = readFileSync(config, "utf8");
+
+      expect(spawnSync("bd", ["config", "set", "dolt.auto-push", "true"], { cwd: ws, env }).status).toBe(0);
+      for (const subcommand of ["autopush-files", "config"]) {
+        const result = run(ws, env, subcommand);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("dolt.auto-push");
+      }
+
+      // Even an explicit false must not be committed.
+      writeFileSync(config, `${original}\ndolt:\n    auto-push: false\n`);
+      const mention = run(ws, env, "autopush-files");
+      expect(mention.status).toBe(1);
+      expect(mention.stderr).toContain("must not set it");
+    });
+  });
+
+  test.each([
+    ["config.local.yaml, nested", "dolt:\n    auto-push: true\n"],
+    ["config.local.yaml, dotted", "dolt.auto-push: true\n"],
+  ])("enabled in %s fails, while an explicit false there passes", (_name, content) => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      const local = join(ws, ".beads/config.local.yaml");
+      writeFileSync(local, content);
+      const bad = run(ws, env, "autopush-files");
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toContain("dolt.auto-push is enabled");
+
+      writeFileSync(local, content.replace("true", "false"));
+      expect(run(ws, env, "autopush-files").status).toBe(0);
+    });
+  });
+
+  test("enabled through BD_DOLT_AUTO_PUSH fails, false passes", () => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      const bad = run(ws, { ...env, BD_DOLT_AUTO_PUSH: "true" }, "autopush-files");
+      expect(bad.status).toBe(1);
+      expect(run(ws, { ...env, BD_DOLT_AUTO_PUSH: "false" }, "autopush-files").status).toBe(0);
+    });
+  });
+});
+
+describe.skipIf(!hasDolt)("beads-guard.sh refuses dolt.auto-push in the Dolt config table", () => {
+  test("a config-table row enables it invisibly to `bd config get`, and the config guard still fails", () => {
+    withTempDir((dir) => {
+      const env = { ...process.env, HOME: dir, DO_NOT_TRACK: "1", BD_NON_INTERACTIVE: "1", BEADS_ACTOR: "tester", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+      delete env.BD_DOLT_AUTO_PUSH;
+      const ws = join(dir, "ws");
+      mkdirSync(ws);
+      const sh = (cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: ws, env, stdio: "pipe" });
+      sh("git", ["init", "-q"]);
+      sh("git", ["config", "user.email", "owner@example.com"]);
+      sh("bd", ["init", "--non-interactive", "--prefix", "t", "--skip-hooks", "--skip-agents"]);
+      execFileSync("dolt", ["sql", "-q", "INSERT INTO config (`key`, value) VALUES ('dolt.auto-push', 'true')"], {
+        cwd: join(ws, ".beads/embeddeddolt/t"),
+        env,
+        stdio: "pipe",
+      });
+
+      const get = spawnSync("bd", ["config", "get", "dolt.auto-push"], { cwd: ws, env, encoding: "utf8" });
+      expect(get.stdout).toContain("not set");
+      expect(spawnSync(guard, ["autopush-files"], { cwd: ws, env }).status).toBe(0);
+      const result = spawnSync(guard, ["config"], { cwd: ws, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Dolt config table enables dolt.auto-push");
+    });
+  });
+});
+
+describe.skipIf(!hasDolt)("beads-guard.sh synced-tables", () => {
+  function workspace(dir: string): { ws: string; env: NodeJS.ProcessEnv; store: string } {
+    const env = { ...process.env, HOME: dir, DO_NOT_TRACK: "1", BD_NON_INTERACTIVE: "1", BEADS_ACTOR: "tester", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+    const ws = join(dir, "ws");
+    mkdirSync(ws);
+    const sh = (cmd: string, args: string[]) => execFileSync(cmd, args, { cwd: ws, env, stdio: "pipe" });
+    sh("git", ["init", "-q"]);
+    sh("git", ["config", "user.email", "owner@example.com"]);
+    sh("bd", ["init", "--non-interactive", "--prefix", "t", "--skip-hooks", "--skip-agents"]);
+    sh("bd", ["create", "--title", "one", "--description", "d", "--silent"]);
+    return { ws, env, store: join(ws, ".beads/embeddeddolt/t") };
+  }
+  const sql = (store: string, env: NodeJS.ProcessEnv, query: string) =>
+    execFileSync("dolt", ["sql", "-q", query], { cwd: store, env, stdio: "pipe" });
+  const run = (ws: string, env: NodeJS.ProcessEnv, out: string) => spawnSync(guard, ["synced-tables", out], { cwd: ws, env, encoding: "utf8" });
+
+  test("a normal workspace passes and its tables are dumped for scanning", () => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      expect(run(ws, env, out).status).toBe(0);
+      for (const table of ["issue_snapshots", "compaction_snapshots", "federation_peers", "interactions", "routes", "custom_types", "custom_statuses", "metadata", "config"]) {
+        expect(() => readFileSync(join(out, "synced-tables", `${table}.json`), "utf8")).not.toThrow();
+      }
+    });
+  });
+
+  test.each([
+    ["custom_types", "INSERT INTO custom_types (name) VALUES ('secret-type')"],
+    ["custom_statuses", "INSERT INTO custom_statuses (name) VALUES ('secret-status')"],
+    ["routes", "INSERT INTO routes (prefix, path) VALUES ('x', '/somewhere')"],
+  ])("rows in %s fail the guard", (table, insert) => {
+    withTempDir((dir) => {
+      const { ws, env, store } = workspace(dir);
+      sql(store, env, insert);
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      const result = run(ws, env, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`synced table ${table} holds`);
+    });
+  });
+
+  test("an unexpected metadata key fails, expected ones pass", () => {
+    withTempDir((dir) => {
+      const { ws, env, store } = workspace(dir);
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      sql(store, env, "INSERT INTO metadata (`key`, value) VALUES ('note_to_self', 'hello')");
+      const result = run(ws, env, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("note_to_self");
+    });
+  });
+
+  test("fails closed when the dolt CLI is not on PATH", () => {
+    withTempDir((dir) => {
+      const { ws, env } = workspace(dir);
+      const noDolt = {
+        ...env,
+        PATH: (env.PATH ?? "").split(":").filter((entry) => spawnSync("sh", ["-c", `[ -x "${entry}/dolt" ]`]).status !== 0).join(":"),
+      };
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      const result = spawnSync(guard, ["synced-tables", out], { cwd: ws, env: noDolt, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("dolt CLI is required");
+    });
+  });
+});
+
+describe("beads-guard.sh gitleaks hardening", () => {
+  function shimGitleaks(dir: string, versionOutput: string): NodeJS.ProcessEnv {
+    mkdirSync(join(dir, "bin"));
+    writeFileSync(
+      join(dir, "bin/gitleaks"),
+      `#!/usr/bin/env bash
+if [ "$1" = version ]; then echo "${versionOutput}"; exit 0; fi
+echo "$@" > "${join(dir, "args.txt")}"
+exit 0
+`,
+    );
+    chmodSync(join(dir, "bin/gitleaks"), 0o755);
+    return { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}` };
+  }
+
+  test.each([
+    ["8.30.1", 0],
+    ["8.30.0", 0],
+    ["8.29.9", 1],
+    ["8.31.0", 1],
+    ["9.0.0", 1],
+    ["", 1],
+  ])("gitleaks %p is accepted only for 8.30.x (exit %p)", (version, expected) => {
+    withTempDir((dir) => {
+      const env = shimGitleaks(dir, version);
+      expect(spawnSync(guard, ["gitleaks-version"], { env, encoding: "utf8" }).status).toBe(expected);
+    });
+  });
+
+  test("scans pass --ignore-gitleaks-allow and an empty ignore file, and drop config overrides", () => {
+    withTempDir((dir) => {
+      const env = { ...shimGitleaks(dir, "8.30.1"), GITLEAKS_CONFIG: "/tmp/evil.toml", GITLEAKS_CONFIG_TOML: "x" };
+      mkdirSync(join(dir, "scan"));
+      const result = spawnSync(guard, ["gitleaks", join(dir, "scan")], { env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      const args = readFileSync(join(dir, "args.txt"), "utf8");
+      expect(args).toContain("dir");
+      expect(args).toContain("--ignore-gitleaks-allow");
+      expect(args).toMatch(/ -i \S+/);
+      expect(args).toContain("--redact");
+    });
+  });
+
+  const hasGitleaks = spawnSync("sh", ["-c", "gitleaks version | grep -q '^8\\.30\\.'"]).status === 0;
+
+  test.skipIf(!hasGitleaks)("with real gitleaks, neither a .gitleaksignore nor an allow comment suppresses a finding", () => {
+    withTempDir((dir) => {
+      const scan = join(dir, "scan");
+      const cwd = join(dir, "cwd");
+      mkdirSync(scan);
+      mkdirSync(cwd);
+      // Assembled at run time so this file never contains a token-shaped literal.
+      const token = ["ghp", "_", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6"].join("");
+      const allow = ["gitleaks", "allow"].join(":");
+      writeFileSync(join(scan, "sample.txt"), `token = "${token}" # ${allow}\n`);
+      writeFileSync(join(cwd, ".gitleaksignore"), "../scan/sample.txt:github-pat:1\n");
+
+      const result = spawnSync(guard, ["gitleaks", "../scan"], { cwd, encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+    });
+  });
+});

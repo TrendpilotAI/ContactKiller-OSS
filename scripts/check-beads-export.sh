@@ -20,7 +20,8 @@
 #   GITHUB_REPOSITORY     owner/name used to pin sync.remote in published mode
 #                         (default: TrendpilotAI/ContactKiller-OSS).
 #
-# Requires: bd, jq, bun, gitleaks, git. Any missing tool, bootstrap/export
+# Requires: bd, jq, bun, gitleaks 8.30.x, git, and the standalone dolt CLI (for
+# the synced-tables check). Any missing tool, bootstrap/export
 # error, empty export while tickets are expected, or scanner error fails the run.
 #
 # Also fails when an export owner exclusion is configured or the export does not
@@ -29,9 +30,20 @@
 # returns anything for a ticket: this repo does not use the native provenance
 # table (AGENTS.md).
 #
-# Not covered: the scan sees only current rows of `bd export --all` and the
-# per-ticket `bd provenance log`. It does not see the kv, config and events
-# tables, provenance rows of deleted tickets, or the Dolt commit history.
+# Also refuses dolt.auto-push in any source (scripts/beads-guard.sh), runs
+# gitleaks with every suppression mechanism disabled, and checks that the
+# synced Dolt tables outside the export are empty.
+#
+# Not covered. The scan sees only current rows of `bd export --all`, the
+# per-ticket `bd provenance log`, the config table's values, and the dumps of
+# the tables listed below. `bd dolt push` also publishes things it does not read:
+# the kv and events tables, provenance rows of deleted tickets, the leases,
+# wisp and counter tables, and the full Dolt commit history. (Dolt history is not
+# scanned from inside bd; it could be walked with the dolt CLI, which this script
+# does not do.) The tables issue_snapshots, compaction_snapshots,
+# federation_peers, interactions, routes, custom_types and custom_statuses are
+# required to be empty, and metadata may hold only bd's own bookkeeping keys;
+# their dumps are scanned as well.
 set -euo pipefail
 
 mode=published
@@ -43,7 +55,7 @@ esac
 
 cd "$(git rev-parse --show-toplevel)"
 
-for tool in bd jq bun gitleaks git; do
+for tool in bd jq bun gitleaks git dolt; do
   command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -63,6 +75,9 @@ if [ "$mode" = published ]; then
   jq -e '.backend == "dolt" and .dolt_mode == "embedded"' .beads/metadata.json >/dev/null \
     || { echo ".beads/metadata.json must select the embedded Dolt backend" >&2; exit 1; }
 
+  # Before anything that could write: nothing may be configured to auto-push.
+  scripts/beads-guard.sh autopush-files
+
   # The committed config decides where bootstrap fetches from; a PR must not be
   # able to point it at a different (clean-looking) remote.
   expected_remote="git+https://github.com/${GITHUB_REPOSITORY:-TrendpilotAI/ContactKiller-OSS}"
@@ -76,7 +91,8 @@ if [ "$mode" = published ]; then
 
   bootstrap_log="$(mktemp)"
   bd bootstrap --yes 2>&1 | tee "$bootstrap_log"
-  if ! grep -qF "Synced database from $expected_remote" "$bootstrap_log"; then
+  # Whole-line match: bd prints this on a line of its own.
+  if ! grep -qxF "Synced database from $expected_remote" "$bootstrap_log"; then
     echo "bootstrap did not sync-clone the published data from $expected_remote" >&2
     echo "(it may have imported local files or created a fresh database)" >&2
     exit 1
@@ -95,6 +111,7 @@ export_file="$scan_dir/beads-export.jsonl"
 scripts/beads-guard.sh config
 bd export --all -o "$export_file"
 scripts/beads-guard.sh listing "$export_file"
+scripts/beads-guard.sh synced-tables "$scan_dir"
 
 if [ -n "${BEADS_AUDIT_BASELINE:-}" ]; then
   [ -f "$BEADS_AUDIT_BASELINE" ] || { echo "audit baseline not found: $BEADS_AUDIT_BASELINE" >&2; exit 1; }
@@ -148,11 +165,12 @@ if [ ! -s "$export_file" ]; then
 else
   bun scripts/check-public-release.ts --scan-export "$export_file" "$scan_dir/interactions.jsonl"
 fi
+bun scripts/check-public-release.ts --scan-export "$scan_dir"/synced-tables/*.json
 if compgen -G "$provenance_dir/*.json" >/dev/null; then
   bun scripts/check-public-release.ts --scan-export "$provenance_dir"/*.json
 fi
 scripts/beads-guard.sh no-allow "$scan_dir"
-gitleaks dir "$scan_dir" --redact --no-banner
+scripts/beads-guard.sh gitleaks "$scan_dir"
 
 if [ "$provenance_rows" -gt 0 ]; then
   echo "bd provenance log returned $provenance_rows row(s): the native provenance table must stay empty in this public repo (AGENTS.md)" >&2

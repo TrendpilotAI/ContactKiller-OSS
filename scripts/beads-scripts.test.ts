@@ -305,6 +305,27 @@ exit 0
     });
   });
 
+  test("the auto-push and gitleaks-version guards run before the first bd command", () => {
+    withTempDir((dir) => {
+      const { env, calls, script } = stubbed(dir);
+      expect(spawnSync(script, [], { cwd: dir, env, encoding: "utf8" }).status).toBe(0);
+      const log = callsOf(calls);
+      expect(log[0]).toBe("STUB beads-guard.sh config");
+      expect(log[1]).toBe("STUB beads-guard.sh gitleaks-version");
+      expect(log.findIndex((line) => line.startsWith("bd "))).toBeGreaterThan(1);
+    });
+  });
+
+  test("a failing auto-push guard stops everything, including the first bd command", () => {
+    withTempDir((dir) => {
+      const { env, calls, script } = stubbed(dir);
+      writeFileSync(join(dir, "scripts/beads-guard.sh"), '#!/usr/bin/env bash\necho "STUB beads-guard.sh $*" >> "$CALLS"\nexit 1\n');
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(callsOf(calls).some((line) => line.startsWith("bd "))).toBe(false);
+    });
+  });
+
   test("a change that is still uncommitted after the scan aborts", () => {
     withTempDir((dir) => {
       const { env, calls, state, script } = stubbed(dir);
@@ -313,6 +334,69 @@ exit 0
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("uncommitted changes");
       expect(pushed(calls)).toBe(false);
+    });
+  });
+});
+
+describe("check-beads-export.sh published mode bootstrap check", () => {
+  const expected = "git+https://github.com/Example/Repo";
+
+  /** A repo with the real script, a stub guard, and a bd/gitleaks/dolt that print what we choose. */
+  function published(dir: string, bootstrapOutput: string): { env: NodeJS.ProcessEnv; script: string } {
+    mkdirSync(join(dir, "scripts"));
+    mkdirSync(join(dir, "bin"));
+    mkdirSync(join(dir, ".beads"));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "scripts/check-beads-export.sh"), readFileSync(resolve(import.meta.dir, "check-beads-export.sh")));
+    chmodSync(join(dir, "scripts/check-beads-export.sh"), 0o755);
+    writeFileSync(join(dir, "scripts/beads-guard.sh"), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(dir, "scripts/beads-guard.sh"), 0o755);
+    writeFileSync(join(dir, ".beads/interactions.jsonl"), '{"tool_name":"bd create","issue_id":"a"}\n');
+    writeFileSync(join(dir, ".beads/metadata.json"), '{"backend":"dolt","dolt_mode":"embedded"}');
+    writeFileSync(join(dir, "bootstrap.out"), bootstrapOutput);
+    writeFileSync(
+      join(dir, "bin/bd"),
+      `#!/usr/bin/env bash
+case "$1 $2" in
+  "config get") echo "${expected}" ;;
+  "bootstrap --yes") cat "${join(dir, "bootstrap.out")}" ;;
+  "dolt remote") echo "origin ${expected}" ;;
+  *) exit 7 ;;
+esac
+`,
+    );
+    for (const tool of ["gitleaks", "dolt"]) writeFileSync(join(dir, "bin", tool), "#!/usr/bin/env bash\nexit 0\n");
+    for (const tool of ["bd", "gitleaks", "dolt"]) chmodSync(join(dir, "bin", tool), 0o755);
+    return {
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, GITHUB_REPOSITORY: "Example/Repo" },
+      script: join(dir, "scripts/check-beads-export.sh"),
+    };
+  }
+
+  const run = (dir: string, bootstrapOutput: string) => {
+    const { env, script } = published(dir, bootstrapOutput);
+    return spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+  };
+
+  test("the exact line is accepted (the run then continues past the bootstrap check)", () => {
+    withTempDir((dir) => {
+      const result = run(dir, `Retrieving remote information.\nSynced database from ${expected}\n`);
+      expect(result.stderr).not.toContain("did not sync-clone");
+    });
+  });
+
+  test.each([
+    ["a prefix on the same line", `note: Synced database from ${expected}\n`],
+    ["a suffix on the same line", `Synced database from ${expected}-evil\n`],
+    ["a trailing path", `Synced database from ${expected}/extra\n`],
+    ["a trailing space", `Synced database from ${expected} \n`],
+    ["a different remote", "Synced database from git+https://github.com/Other/Repo\n"],
+    ["no sync line at all", "Imported 6 issues from .beads/issues.jsonl\n"],
+  ])("%s is rejected", (_name, output) => {
+    withTempDir((dir) => {
+      const result = run(dir, output);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("did not sync-clone");
     });
   });
 });

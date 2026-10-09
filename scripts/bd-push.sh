@@ -4,6 +4,8 @@
 # authorises publishing. A green scan does NOT prove Dolt history is clean; see
 # AGENTS.md.
 #
+# Needs bd, jq, bun, gitleaks 8.30.x and the dolt CLI (scripts/check-beads-export.sh).
+#
 # Accepted arguments: none, or exactly `--remote origin`. Everything else
 # (including -C/--directory, --db, --readonly, --sandbox, --dolt-auto-commit,
 # --force and any other bd flag) is rejected, so the push always targets the
@@ -28,6 +30,11 @@ case "$#" in
 esac
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Before the first bd command that could write (and so auto-push): refuse
+# dolt.auto-push in any source, and require the pinned gitleaks series.
+scripts/beads-guard.sh config
+scripts/beads-guard.sh gitleaks-version
 
 # Dolt only pushes committed state, while the scans read the working set. So
 # first require a clean working set: `bd dolt commit` is the only way bd 1.3.1
