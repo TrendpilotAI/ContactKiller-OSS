@@ -19,21 +19,42 @@ const EXTENSION = /(?:;\s*ext\s*=\s*|[\s,]*(?:extension|ext\.?|x)\s*)(\d{1,8})\s
 // differ in area code, country code, leading digits, or extension never
 // compare equal.
 export function normalizePhone(phone: string): string | null {
-  let base = phone.trim()
-  let extension: string | null = null
-
-  const match = EXTENSION.exec(base)
-  if (match) {
-    extension = match[1]
-    base = base.slice(0, match.index).trim()
-  }
+  const { base, extension } = splitExtension(phone)
   if (base === '' || !PHONE_CHARACTERS.test(base)) return null
+  return withExtension(toE164(base), extension)
+}
 
+// A provider that already knows the country (Google's `canonicalForm`) is
+// better evidence than guessing "US" for a bare national number. Its E.164
+// replaces the parsed number; the extension still comes from the raw value,
+// since canonical forms do not carry one. Without a usable canonical form this
+// is exactly normalizePhone.
+export function phoneKey(raw: string, canonicalForm?: string | null): string | null {
+  const canonical = canonicalForm?.trim()
+  if (canonical && canonical.startsWith('+') && PHONE_CHARACTERS.test(canonical)) {
+    const e164 = toE164(canonical)
+    if (e164) return withExtension(e164, splitExtension(raw).extension)
+  }
+  return normalizePhone(raw)
+}
+
+function splitExtension(value: string): { base: string; extension: string | null } {
+  const trimmed = value.trim()
+  const match = EXTENSION.exec(trimmed)
+  return match
+    ? { base: trimmed.slice(0, match.index).trim(), extension: match[1] }
+    : { base: trimmed, extension: null }
+}
+
+function withExtension(e164: string | null, extension: string | null): string | null {
+  if (e164 === null) return null
+  return extension === null ? e164 : `${e164};ext=${extension}`
+}
+
+function toE164(number: string): string | null {
   try {
-    const parsed = parsePhoneNumber(base, 'US')
-    if (!parsed.isValid()) return null
-    const e164 = parsed.format('E.164')
-    return extension === null ? e164 : `${e164};ext=${extension}`
+    const parsed = parsePhoneNumber(number, 'US')
+    return parsed.isValid() ? parsed.format('E.164') : null
   } catch {
     return null
   }

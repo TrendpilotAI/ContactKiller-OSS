@@ -13,7 +13,7 @@ import {
 } from '@/lib/db/contacts'
 import type { Platform } from '@/lib/db/types'
 import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
-import { normalizePhone } from './phone'
+import { normalizePhone, phoneKey } from './phone'
 
 export interface ProviderContact {
   // The provider's identifier for this contact: Google's resourceName, or a
@@ -27,7 +27,9 @@ export interface ProviderContact {
   stableId: boolean
   fields: ImportedFields
   emails: { email: string; label: string }[]
-  phones: { phone: string; label: string }[]
+  // `phone` is the value as the provider gave it (stored as-is). `canonicalForm`
+  // is the provider's own E.164, when it supplies one.
+  phones: { phone: string; label: string; canonicalForm?: string | null }[]
 }
 
 export interface ReconcileResult {
@@ -112,14 +114,16 @@ export async function reconcileProviderContacts(
     candidates.push({
       ...contact,
       emailKeys: [...new Set(contact.emails.map(e => e.email.trim().toLowerCase()))],
-      phoneKeys: [...new Set(contact.phones.map(p => normalizePhone(p.phone)).filter((p): p is string => p !== null))],
+      phoneKeys: [...new Set(contact.phones.map(p => phoneKey(p.phone, p.canonicalForm)).filter((p): p is string => p !== null))],
       sharedEmails: [],
     })
   }
 
   const index = await loadIdentityIndex(db, platform)
   const localPhones = new Map<string, Set<string>>()
+  const localRawPhones = new Set<string>()
   for (const p of index.phones) {
+    localRawPhones.add(p.phone.trim())
     const normalized = normalizePhone(p.phone)
     if (normalized) {
       const set = localPhones.get(normalized) ?? new Set<string>()
@@ -132,6 +136,19 @@ export async function reconcileProviderContacts(
   for (const candidate of candidates) {
     candidate.sharedEmails = candidate.emailKeys.filter(email => (emailOwners.get(email)?.size ?? 0) > 1)
   }
+
+  // A card is recognisable by an exact key only if it has an email or phone
+  // that is not shared with another card in this batch.
+  const hasUsableKey = (candidate: Candidate): boolean =>
+    candidate.emailKeys.some(email => !candidate.sharedEmails.includes(email)) ||
+    candidate.phoneKeys.some(phone => (phoneOwners.get(phone)?.size ?? 0) <= 1)
+
+  // Whether any local contact already carries one of the card's exact values
+  // (emails, valid phone keys, or the raw phone text of an unkeyable number).
+  const carriesLocally = (candidate: Candidate): boolean =>
+    candidate.emailKeys.some(email => index.emails.has(email)) ||
+    candidate.phoneKeys.some(phone => localPhones.has(phone)) ||
+    candidate.phones.some(p => localRawPhones.has(p.phone.trim()))
 
   // Pass 1: decide, using only exact identifiers and only against what existed
   // before this batch. Nothing here writes.
@@ -171,8 +188,9 @@ export async function reconcileProviderContacts(
     } else if (targets.size === 1) {
       const [target] = targets
       const existingLink = index.linkByContact.get(target)
-      if (existingLink && candidate.stableId) {
-        // (A different id: the same id would have matched above.)
+      if (existingLink) {
+        // Linked to a different id (the same id would have matched above). A
+        // card without an id of its own cannot claim a linked contact either.
         decisions.set(candidate.providerId, {
           kind: 'skip',
           reason: `the matching contact is already linked to a different ${label} contact`,
@@ -185,6 +203,14 @@ export async function reconcileProviderContacts(
           hasLink: existingLink !== undefined,
         })
       }
+    } else if (!candidate.stableId && !hasUsableKey(candidate) && carriesLocally(candidate)) {
+      // No id and nothing unique to recognise it by, yet its exact values are
+      // already on a local contact: this is most likely a card from an earlier
+      // import. Creating it again would multiply duplicates on every sync.
+      decisions.set(candidate.providerId, {
+        kind: 'skip',
+        reason: "it can't be told apart from an earlier import; not re-imported",
+      })
     } else {
       decisions.set(candidate.providerId, { kind: 'create' })
     }

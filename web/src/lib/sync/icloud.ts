@@ -66,10 +66,12 @@ function toProviderContact(data: Record<string, unknown>): ProviderContact {
     label: getType(e) || 'personal',
   })).filter(e => e.email && e.email.includes('@'))
 
+  // The raw value is stored and matched as written (minus a leading tel: and
+  // vCard escapes); normalizePhone alone decides whether it is a number.
   const phones = extractArray(data.tel).map(p => ({
-    phone: cleanPhoneValue(p),
+    phone: rawPhoneValue(p),
     label: getType(p) || 'mobile',
-  })).filter(p => p.phone && p.phone.length >= 7)
+  })).filter(p => p.phone)
 
   const uid = getString(data.uid)?.trim()
   const hasUid = !!uid && uid.length <= MAX_UID_LENGTH
@@ -114,10 +116,15 @@ function cleanValue(value: unknown): string {
   return str.replace(/^(tel:|mailto:)/i, '').trim()
 }
 
-function cleanPhoneValue(value: unknown): string {
-  const str = cleanValue(value)
-  // Keep only digits, spaces, dashes, parentheses, and plus sign
-  return str.replace(/[^\d\s\-()+ ]/g, '').trim()
+// vCard TEXT escapes: \, \; \\ and \n.
+function unescapeVcard(value: string): string {
+  return value.replace(/\\([,;\\nN])/g, (_, char: string) => (char === 'n' || char === 'N' ? '\n' : char))
+}
+
+function rawPhoneValue(value: unknown): string {
+  const str = getString(value)
+  if (!str) return ''
+  return unescapeVcard(str.trim().replace(/^tel:/i, '')).trim()
 }
 
 function getType(value: unknown): string | null {

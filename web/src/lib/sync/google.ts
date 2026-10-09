@@ -72,7 +72,7 @@ function toProviderContact(gc: people_v1.Schema$Person): ProviderContact | null 
       .map(e => ({ email: e.value!, label: e.type || 'other' }))
       .filter(e => e.email),
     phones: (gc.phoneNumbers || [])
-      .map(p => ({ phone: p.value!, label: p.type || 'other' }))
+      .map(p => ({ phone: p.value!, label: p.type || 'other', canonicalForm: p.canonicalForm }))
       .filter(p => p.phone),
   }
 }

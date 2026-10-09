@@ -15,6 +15,8 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 - Sign-up is off by default and enforced by the database (rolling the gate back leaves it closed); every state-changing route checks the request origin, and JSON bodies are size-capped.
 - iCloud import follows the Google rules: it matches on the vCard UID, exact email or valid phone, fills empty fields, files conflicts instead of overwriting, imports contacts that share an email separately, and reports every card as created, matched, skipped, or errored. A failed sign-up now gives the same generic message for every cause.
 - Phone matching includes the extension, rejects values that are not just a number, and a card whose id points at one contact but whose email or phone point at another is skipped. Cards without a UID no longer store a throwaway link.
+- iCloud phone values are no longer reduced to digits before matching (which could turn "867-5309 x201" or "Office: 201-555-0123" into another person's number); the raw value is stored and matched. Phone values already imported by an earlier version were stored in the reduced form and are not migrated, which is acceptable because this repository only holds prototype data.
+- UID-less cards that cannot be told apart from an earlier import are skipped and reported instead of duplicated, and never merge into a contact that already has a provider link. Google's `canonicalForm` is preferred when building phone keys.
 - A provider identity is unique per user. Google contacts that share an email are imported separately and flagged for review rather than skipped or merged.
 
 ### Fixed
