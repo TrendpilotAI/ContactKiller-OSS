@@ -24,26 +24,24 @@
 # the synced-tables check). Any missing tool, bootstrap/export
 # error, empty export while tickets are expected, or scanner error fails the run.
 #
-# Also fails when an export owner exclusion is configured or the export does not
-# hold exactly the tickets `bd list` shows (scripts/beads-guard.sh), when a
-# scanned file carries a gitleaks allow comment, and when `bd provenance log`
-# returns anything for a ticket: this repo does not use the native provenance
-# table (AGENTS.md).
+# Also fails when an export owner exclusion or directory label filter is
+# configured, when dolt.auto-push is enabled anywhere, when the export does not
+# hold exactly the tickets `bd list` shows, when a scanned file carries a
+# gitleaks allow comment (all in scripts/beads-guard.sh), when gitleaks is not
+# 8.30.x, and when the Dolt store has an unknown table or a table that must stay
+# empty (including provenance_events) is not empty.
 #
-# Also refuses dolt.auto-push in any source (scripts/beads-guard.sh), runs
-# gitleaks with every suppression mechanism disabled, and checks that the
-# synced Dolt tables outside the export are empty.
+# Scanned: the current rows of `bd export --all`; the values of the config,
+# metadata, child_counters, issue_counter and schema_migrations tables; the audit
+# log; and every change made by the Dolt commits after the trusted baseline in
+# scripts/beads-history-baseline.txt (row-level diffs of every published table,
+# config history and commit messages), so a forbidden key set and later unset, or
+# a private value added and later removed, is refused even though the final state
+# is clean.
 #
-# Not covered. The scan sees only current rows of `bd export --all`, the
-# per-ticket `bd provenance log`, the config table's values, and the dumps of
-# the tables listed below. `bd dolt push` also publishes things it does not read:
-# the kv and events tables, provenance rows of deleted tickets, the leases,
-# wisp and counter tables, and the full Dolt commit history. (Dolt history is not
-# scanned from inside bd; it could be walked with the dolt CLI, which this script
-# does not do.) The tables issue_snapshots, compaction_snapshots,
-# federation_peers, interactions, routes, custom_types and custom_statuses are
-# required to be empty, and metadata may hold only bd's own bookkeeping keys;
-# their dumps are scanned as well.
+# Not covered: Dolt history at or before the baseline commit (it was reviewed by
+# hand, not scanned here), the tables that dolt_ignore keeps out of commits (they
+# are never pushed), and anything bd stores outside the Dolt database.
 set -euo pipefail
 
 mode=published
@@ -113,6 +111,13 @@ bd export --all -o "$export_file"
 scripts/beads-guard.sh listing "$export_file"
 scripts/beads-guard.sh synced-tables "$scan_dir"
 
+# Everything after the trusted baseline commit: a forbidden key that was set and
+# later unset, or a private value that was added and later removed, still shows
+# up in these dumps and fails the run.
+baseline="$(grep -v '^[[:space:]]*#' scripts/beads-history-baseline.txt | grep -m1 -E '^[0-9a-v]{32}$' || true)"
+[ -n "$baseline" ] || { echo "scripts/beads-history-baseline.txt has no baseline commit" >&2; exit 1; }
+scripts/beads-guard.sh history "$baseline" "$scan_dir"
+
 if [ -n "${BEADS_AUDIT_BASELINE:-}" ]; then
   [ -f "$BEADS_AUDIT_BASELINE" ] || { echo "audit baseline not found: $BEADS_AUDIT_BASELINE" >&2; exit 1; }
   expected_ids="$(scripts/beads-expected-ids.sh "$audit_log" "$BEADS_AUDIT_BASELINE")"
@@ -141,20 +146,6 @@ if [ -n "$unrecorded" ]; then
   exit 1
 fi
 
-# The native provenance table is not used in this repo and is not part of
-# `bd export`; dump it per ticket so it is scanned, and fail if it has rows.
-provenance_dir="$scan_dir/provenance"
-mkdir -p "$provenance_dir"
-provenance_rows=0
-n=0
-for id in $exported_ids; do
-  n=$((n + 1))
-  out="$provenance_dir/ticket-$n.json"
-  bd provenance log "$id" --json > "$out"
-  rows="$(jq 'length' "$out")"
-  provenance_rows=$((provenance_rows + rows))
-done
-
 cp "$audit_log" "$scan_dir/interactions.jsonl"
 if [ ! -s "$export_file" ]; then
   # Only reachable when no tickets are expected; there is nothing to scan but
@@ -165,16 +156,9 @@ if [ ! -s "$export_file" ]; then
 else
   bun scripts/check-public-release.ts --scan-export "$export_file" "$scan_dir/interactions.jsonl"
 fi
-bun scripts/check-public-release.ts --scan-export "$scan_dir"/synced-tables/*.json
-if compgen -G "$provenance_dir/*.json" >/dev/null; then
-  bun scripts/check-public-release.ts --scan-export "$provenance_dir"/*.json
-fi
+bun scripts/check-public-release.ts --scan-export "$scan_dir"/synced-tables/*.json "$scan_dir"/history/*.json
 scripts/beads-guard.sh no-allow "$scan_dir"
 scripts/beads-guard.sh gitleaks "$scan_dir"
 
-if [ "$provenance_rows" -gt 0 ]; then
-  echo "bd provenance log returned $provenance_rows row(s): the native provenance table must stay empty in this public repo (AGENTS.md)" >&2
-  exit 1
-fi
 
 echo "Beads export scan passed: $exported_count ticket(s) exported ($mode mode)."

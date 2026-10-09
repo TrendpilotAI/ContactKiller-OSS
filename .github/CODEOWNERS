@@ -6,6 +6,7 @@
 /scripts/check-*                @TrendpilotAI
 /scripts/beads-expected-ids.sh  @TrendpilotAI
 /scripts/beads-guard.sh         @TrendpilotAI
+/scripts/beads-history-baseline.txt @TrendpilotAI
 /scripts/bd-push.sh             @TrendpilotAI
 /.beads/config.yaml             @TrendpilotAI
 /.beads/interactions.jsonl      @TrendpilotAI

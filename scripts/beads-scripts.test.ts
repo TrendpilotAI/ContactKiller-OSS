@@ -202,13 +202,25 @@ describe("bd-push.sh", () => {
     for (const stub of ["check-beads-export.sh", "beads-guard.sh"]) {
       writeFileSync(
         join(dir, "scripts", stub),
-        '#!/usr/bin/env bash\necho "STUB $(basename "$0") $*" >> "$CALLS"\n[ -f "$STATE/hook-$(basename "$0")" ] && . "$STATE/hook-$(basename "$0")"\nexit 0\n',
+        `#!/usr/bin/env bash
+echo "STUB $(basename "$0") $*" >> "$CALLS"
+[ -f "$STATE/hook-$(basename "$0")" ] && . "$STATE/hook-$(basename "$0")"
+if [ "$(basename "$0")" = beads-guard.sh ]; then
+  case "$1" in
+    remote-base) echo "\${REMOTE_BASE:-ROOT}" ;;
+    history) mkdir -p "$3/history" && echo '{"rows":[]}' > "$3/history/commits.json" ;;
+  esac
+fi
+exit 0
+`,
       );
     }
     writeFileSync(
       join(dir, "bin/bd"),
       `#!/usr/bin/env bash
 echo "bd $*" >> "$CALLS"
+# bd prints this on every command in a fresh clone; it must never confuse the checks.
+echo "Warning: .beads has permissions 0755 (recommended: 0700). Run: chmod 700 .beads" >&2
 case "$1 $2" in
   "dolt commit")
     if [ -f "$STATE/dirty" ]; then echo "Committed 1 change"; rm -f "$STATE/dirty"; else echo "Nothing to commit."; fi ;;
@@ -301,6 +313,66 @@ exit 0
       const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("exported tracker content changed");
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("a stderr warning from bd (permissions on a fresh clone) does not break the clean check", () => {
+    withTempDir((dir) => {
+      const { env, calls, script } = stubbed(dir);
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      // The warning is still visible to the person running the script.
+      expect(result.stderr).toContain("permissions 0755");
+      expect(pushed(calls)).toBe(true);
+    });
+  });
+
+  test("an unexpected stdout from bd dolt commit still aborts, whatever stderr says", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "dirty"), "");
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("the commits the push would publish are scanned before it", () => {
+    withTempDir((dir) => {
+      const { env, calls, script } = stubbed(dir);
+      const result = spawnSync(script, [], { cwd: dir, env: { ...env, REMOTE_BASE: "abcdefghijklmnopqrstuvabcdefghij" }, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      const log = callsOf(calls);
+      expect(log).toContain("STUB beads-guard.sh remote-base origin");
+      expect(log).toContain("STUB beads-guard.sh history abcdefghijklmnopqrstuvabcdefghij " + log.find((l) => l.includes("history abc"))!.split(" ").at(-1));
+      const history = log.findIndex((line) => line.startsWith("STUB beads-guard.sh history"));
+      expect(history).toBeGreaterThan(log.indexOf("STUB check-beads-export.sh --local"));
+      expect(history).toBeLessThan(log.findIndex((line) => line.startsWith("bd dolt push")));
+      expect(log.some((line) => line.startsWith("STUB beads-guard.sh gitleaks "))).toBe(true);
+    });
+  });
+
+  test("--remote origin asks for that remote's head", () => {
+    withTempDir((dir) => {
+      const { env, calls, script } = stubbed(dir);
+      expect(spawnSync(script, ["--remote", "origin"], { cwd: dir, env, encoding: "utf8" }).status).toBe(0);
+      expect(callsOf(calls)).toContain("STUB beads-guard.sh remote-base origin");
+    });
+  });
+
+  test("a refused history scan (or an undeterminable remote head) stops the push", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "hook-beads-guard.sh"), '[ "$1" = history ] && exit 1\n');
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(pushed(calls)).toBe(false);
+    });
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "hook-beads-guard.sh"), '[ "$1" = remote-base ] && exit 1\n');
+      expect(spawnSync(script, [], { cwd: dir, env, encoding: "utf8" }).status).not.toBe(0);
       expect(pushed(calls)).toBe(false);
     });
   });

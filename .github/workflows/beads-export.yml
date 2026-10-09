@@ -64,7 +64,7 @@ jobs:
             : > "$baseline"
           fi
           echo "BEADS_AUDIT_BASELINE=$baseline" >> "$GITHUB_ENV"
-      - name: Install checksum-pinned Dolt (used only by the guard tests)
+      - name: Install checksum-pinned Dolt (guard tests, table and history scan)
         shell: bash
         run: |
           curl --fail --location --silent --show-error \
@@ -74,9 +74,9 @@ jobs:
             | sha256sum --check --strict
           tar --extract --gzip --file /tmp/dolt.tar.gz --directory /tmp dolt-linux-amd64/bin/dolt
           sudo install -m 0755 /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
-      - name: Guard tests (real bd and Dolt)
+      - name: Guard tests (real bd, Dolt and gitleaks, local workspaces only)
         run: bun test scripts/beads-guard.test.ts
-      - name: Bootstrap published tracker data, export, and scan
+      - name: Bootstrap the published ref, then scan the export, tables and Dolt history
         run: scripts/check-beads-export.sh
 
   alert:

@@ -42,8 +42,13 @@ scripts/beads-guard.sh gitleaks-version
 # when clean, and otherwise commits what was pending). Pending changes abort the
 # push; they are now committed, so re-running scans exactly what would be pushed.
 require_clean_working_set() {
+  # stdout only: bd also prints warnings (for example about .beads permissions) on
+  # stderr, which must neither fail the comparison nor be swallowed.
   local out
-  out="$(bd dolt commit 2>&1)" || { echo "bd dolt commit failed: $out" >&2; exit 1; }
+  if ! out="$(bd dolt commit)"; then
+    echo "bd dolt commit failed" >&2
+    exit 1
+  fi
   if [ "$out" != "Nothing to commit." ]; then
     echo "the Dolt working set had uncommitted changes; they were just committed. Review them and re-run." >&2
     exit 1
@@ -71,6 +76,22 @@ digest_before="$(export_digest)"
 bun scripts/check-public-release.ts
 scripts/check-beads-export.sh --local
 scripts/beads-guard.sh no-allow .beads
+
+# History that this push would publish: every Dolt commit the remote does not have
+# yet. A forbidden key set and later unset, or a private value added and later
+# removed, is in those commits even though the final state is clean.
+remote_name="origin"
+[ "${#remote_args[@]}" -eq 2 ] && remote_name="${remote_args[1]}"
+base="$(scripts/beads-guard.sh remote-base "$remote_name")"
+[ -n "$base" ] || { echo "could not determine the remote head; not pushing" >&2; exit 1; }
+unpushed_dir="$(mktemp -d)"
+trap 'rm -rf "$unpushed_dir"' EXIT
+scripts/beads-guard.sh history "$base" "$unpushed_dir"
+unpushed_files=("$unpushed_dir"/history/*.json)
+[ -e "${unpushed_files[0]}" ] || { echo "no history dump was produced; not pushing" >&2; exit 1; }
+bun scripts/check-public-release.ts --scan-export "${unpushed_files[@]}"
+scripts/beads-guard.sh no-allow "$unpushed_dir"
+scripts/beads-guard.sh gitleaks "$unpushed_dir"
 
 # Last step before pushing: nothing may have changed since the scan began.
 require_clean_working_set

@@ -13,11 +13,23 @@
 #   beads-guard.sh gitleaks-version        gitleaks is 8.30.x
 #   beads-guard.sh gitleaks <dir>          run gitleaks 8.30.x on <dir> with
 #                                          every suppression mechanism disabled
-#   beads-guard.sh synced-tables <dir>     the Dolt tables `bd dolt push`
-#                                          publishes but the export does not
-#                                          contain are empty (metadata: only
-#                                          expected keys); dumps them into <dir>
-#                                          for scanning. Needs the dolt CLI.
+#   beads-guard.sh synced-tables <dir>     the Dolt store holds only known tables;
+#                                          those `bd dolt push` publishes but the
+#                                          export does not contain are empty
+#                                          (metadata: only expected keys); dumps
+#                                          the rest into <dir> for scanning.
+#                                          Needs the dolt CLI.
+#   beads-guard.sh history <base|ROOT> <dir>
+#                                          dump every change made by the Dolt
+#                                          commits after <base> (or all commits for
+#                                          ROOT) into <dir>/history for scanning,
+#                                          and refuse a forbidden config key (set
+#                                          and later unset still counts) or a
+#                                          table outside the published set
+#   beads-guard.sh remote-base [remote]    fetch <remote> (default origin) with the
+#                                          dolt CLI and print its head commit, or
+#                                          ROOT if it has none; fails if that head
+#                                          is not an ancestor of local HEAD
 #
 # Why: `bd export` silently drops issues whose creator matches
 # export.exclude_owner / export.exclude_owners, and a bare `bd list` silently
@@ -34,6 +46,38 @@
 # (config.yaml, config.local.yaml, the environment, the config table); the
 # committed config.yaml must not mention it at all.
 set -euo pipefail
+
+
+# The embedded Dolt store, and a read-only SQL helper for it.
+dolt_store() {
+  command -v dolt >/dev/null 2>&1 || { echo "the dolt CLI is required" >&2; exit 1; }
+  local db
+  db="$(jq -er '.dolt_database' "${BEADS_DIR:-.beads}/metadata.json")"
+  case "$db" in
+    ""|*[!A-Za-z0-9_-]*) echo "unexpected dolt_database name in metadata.json" >&2; exit 1 ;;
+  esac
+  store="${BEADS_DIR:-.beads}/embeddeddolt/$db"
+  [ -d "$store" ] || { echo "no embedded Dolt store at $store" >&2; exit 1; }
+}
+dq() { (cd "$store" && dolt sql -r json -q "$1"); }
+dq_csv() { (cd "$store" && dolt sql -r csv -q "$1" | tail -n +2); }
+
+# Tables bd 1.3.1 creates. Published = committed, so `bd dolt push` sends them.
+# Ignored = matched by dolt_ignore, never committed and never pushed. Views hold no data.
+PUBLISHED_TABLES="child_counters comments compaction_snapshots config custom_statuses custom_types dependencies federation_peers interactions issue_counter issue_snapshots issues labels metadata provenance_events routes schema_migrations"
+IGNORED_TABLES="bd_events_journal bd_events_seq events ignored_schema_migrations leases local_metadata repo_mtimes wisp_child_counters wisp_comments wisp_dependencies wisp_events wisp_labels wisps"
+VIEWS="blocked_issues ready_issues"
+# Versioned Dolt metadata that legitimately appears in commits.
+DOLT_SYSTEM_TABLES="dolt_ignore dolt_schemas dolt_nonlocal_tables"
+# Published tables other than `metadata` that this repo requires to stay empty.
+EMPTY_TABLES="issue_snapshots compaction_snapshots federation_peers interactions routes custom_types custom_statuses provenance_events"
+# Tables not in `bd export` whose contents are dumped and scanned.
+# (config holds bd kv values as kv.* rows, which `bd config list` does not show.)
+DUMPED_TABLES="config metadata child_counters issue_counter schema_migrations"
+EXPECTED_DOLT_IGNORE="bd_events_journal bd_events_seq events ignored_schema_migrations leases local_metadata repo_mtimes wisp_% wisps"
+FORBIDDEN_CONFIG_KEY='^(export\.exclude_owner|directory\.label|dolt\.auto[-_]push)'
+
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Is this config value one of the spellings that mean "off"?
 is_off() {
@@ -200,39 +244,130 @@ case "$cmd" in
 
   synced-tables)
     dir="${2:?usage: $0 synced-tables <dir>}"
-    command -v dolt >/dev/null 2>&1 || { echo "the dolt CLI is required to check the synced tables" >&2; exit 1; }
-    db="$(jq -er '.dolt_database' "${BEADS_DIR:-.beads}/metadata.json")"
-    case "$db" in
-      ""|*[!A-Za-z0-9_-]*) echo "unexpected dolt_database name in metadata.json" >&2; exit 1 ;;
-    esac
-    store="${BEADS_DIR:-.beads}/embeddeddolt/$db"
-    [ -d "$store" ] || { echo "no embedded Dolt store at $store" >&2; exit 1; }
+    dolt_store
     mkdir -p "$dir/synced-tables"
+
+    # Every table must be one we know; an unknown one could carry data nothing scans.
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if ! in_list "$name" "$PUBLISHED_TABLES $IGNORED_TABLES $VIEWS"; then
+        echo "the Dolt store has a table that is not on the known list: $name" >&2
+        exit 1
+      fi
+    done < <(dq_csv "SHOW TABLES" | tr -d '"')
+
+    # The dolt_ignore patterns decide which tables are never pushed; they must not change.
+    ignore_patterns="$(dq_csv "SELECT pattern FROM dolt_ignore WHERE ignored = 1" | sort | tr '\n' ' ')"
+    expected_patterns="$(printf '%s\n' $EXPECTED_DOLT_IGNORE | sort | tr '\n' ' ')"
+    if [ "$ignore_patterns" != "$expected_patterns" ]; then
+      echo "dolt_ignore patterns changed (expected: $expected_patterns; found: $ignore_patterns)" >&2
+      exit 1
+    fi
+
     # Published by `bd dolt push` but not part of `bd export`; policy is to leave them empty.
-    for table in issue_snapshots compaction_snapshots federation_peers interactions routes custom_types custom_statuses; do
-      out="$dir/synced-tables/$table.json"
-      (cd "$store" && dolt sql -r json -q "SELECT * FROM \`$table\`") > "$out"
-      rows="$(jq '(.rows // []) | length' "$out")"
-      if [ "$rows" -ne 0 ]; then
-        echo "synced table $table holds $rows row(s); this repo expects it to stay empty (see AGENTS.md)" >&2
+    for table in $EMPTY_TABLES; do
+      count="$(dq_csv "SELECT COUNT(*) FROM \`$table\`")"
+      if [ "$count" != "0" ]; then
+        echo "synced table $table holds $count row(s); this repo expects it to stay empty (see AGENTS.md)" >&2
         exit 1
       fi
     done
-    # metadata: bd's own bookkeeping keys only.
-    out="$dir/synced-tables/metadata.json"
-    (cd "$store" && dolt sql -r json -q "SELECT * FROM metadata") > "$out"
-    unexpected="$(jq -r '(.rows // [])[] | .key | select(. as $k | ["_project_id","clone_id","last_import_time","repo_id"] | index($k) | not)' "$out")"
+
+    # Dump the rest for scanning; metadata may hold bd's own bookkeeping keys only.
+    for table in $DUMPED_TABLES; do
+      dq "SELECT * FROM \`$table\`" > "$dir/synced-tables/$table.json"
+    done
+    unexpected="$(jq -r '(.rows // [])[] | .key | select(. as $k | ["_project_id","clone_id","last_import_time","repo_id"] | index($k) | not)' "$dir/synced-tables/metadata.json")"
     if [ -n "$unexpected" ]; then
       echo "synced table metadata holds unexpected key(s):" >&2
       printf '  %s\n' $unexpected >&2
       exit 1
     fi
-    # The config table's values are scanned too (its keys are policed by the config guard).
-    bd config list --json > "$dir/synced-tables/config.json"
+    # bd's own view of the config, scanned as well (its keys are policed by the config guard).
+    bd config list --json > "$dir/synced-tables/config-list.json"
+    ;;
+
+  history)
+    base="${2:?usage: $0 history <base|ROOT> <dir>}"
+    dir="${3:?usage: $0 history <base|ROOT> <dir>}"
+    dolt_store
+    case "$base" in
+      ROOT) range="HEAD" ;;
+      *[!0-9a-v]*|"") echo "invalid Dolt commit hash: $base" >&2; exit 1 ;;
+      *)
+        merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$base', 'HEAD')" | tr -d '"')" \
+          || { echo "Dolt commit $base is not in this store's history" >&2; exit 1; }
+        if [ "$merge_base" != "$base" ]; then
+          echo "Dolt commit $base is not an ancestor of HEAD; cannot establish which commits are new" >&2
+          exit 1
+        fi
+        range="$base..HEAD"
+        ;;
+    esac
+    out="$dir/history"
+    mkdir -p "$out"
+    in_range="(SELECT commit_hash FROM dolt_log('$range'))"
+
+    dq "SELECT commit_hash, committer, email, date, message FROM dolt_log('$range')" > "$out/commits.json"
+    commit_count="$(jq '(.rows // []) | length' "$out/commits.json")"
+
+    # Every table touched by those commits must be a published table (this also names
+    # tables that were created and dropped inside the range).
+    touched="$(dq_csv "SELECT DISTINCT table_name FROM dolt_diff WHERE commit_hash IN $in_range" | tr -d '"')"
+    for table in $touched; do
+      if ! in_list "$table" "$PUBLISHED_TABLES $DOLT_SYSTEM_TABLES"; then
+        echo "Dolt history after $base touched a table outside the published set: $table" >&2
+        exit 1
+      fi
+    done
+    # Row-level changes (added, modified and removed rows) of each touched table.
+    for table in $touched; do
+      if in_list "$table" "$DOLT_SYSTEM_TABLES"; then
+        # Dolt's own versioned metadata (ignore patterns, view definitions): best effort.
+        dq "SELECT * FROM \`dolt_diff_$table\` WHERE to_commit IN $in_range" > "$out/diff_$table.json" 2>/dev/null \
+          || echo '{"rows":[]}' > "$out/diff_$table.json"
+      else
+        dq "SELECT * FROM \`dolt_diff_$table\` WHERE to_commit IN $in_range" > "$out/diff_$table.json" \
+          || { echo "could not read the history of table $table (dropped or changed in range?)" >&2; exit 1; }
+      fi
+    done
+    dq "SELECT * FROM dolt_history_config WHERE commit_hash IN $in_range" > "$out/history_config.json"
+    if [ "$base" != ROOT ]; then
+      (cd "$store" && dolt diff "$base" HEAD) > "$out/net.diff" 2>&1 || true
+    fi
+
+    # A forbidden config key counts even if a later commit removed it again.
+    if [ -s "$out/diff_config.json" ]; then
+      bad="$(jq -r '(.rows // [])[] | [.to_key, .from_key][] | select(. != null)' "$out/diff_config.json" \
+        | grep -iE "$FORBIDDEN_CONFIG_KEY" | sort -u || true)"
+      if [ -n "$bad" ]; then
+        echo "Dolt history after $base sets or removes a forbidden config key (even if unset again):" >&2
+        printf '  %s\n' $bad >&2
+        exit 1
+      fi
+    fi
+    echo "history: $commit_count commit(s) after $base dumped for scanning" >&2
+    ;;
+
+  remote-base)
+    remote="${2:-origin}"
+    dolt_store
+    (cd "$store" && dolt fetch "$remote" >/dev/null 2>&1) || { echo "dolt fetch $remote failed" >&2; exit 1; }
+    head="$(dq_csv "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$remote/main'" | tr -d '"')"
+    if [ -z "$head" ]; then
+      echo ROOT
+      exit 0
+    fi
+    merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$head', 'HEAD')" | tr -d '"')"
+    if [ "$merge_base" != "$head" ]; then
+      echo "the remote head $head is not an ancestor of local HEAD; a push would not be a fast-forward" >&2
+      exit 1
+    fi
+    echo "$head"
     ;;
 
   *)
-    echo "usage: $0 config | autopush-files | listing <export-file> | no-allow <dir> | gitleaks-version | gitleaks <dir> | synced-tables <dir>" >&2
+    echo "usage: $0 config | autopush-files | listing <export-file> | no-allow <dir> | gitleaks-version | gitleaks <dir> | synced-tables <dir> | history <base|ROOT> <dir> | remote-base [remote]" >&2
     exit 2
     ;;
 esac
