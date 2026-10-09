@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   public-release:
@@ -24,6 +24,21 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun scripts/check-public-release.ts
+      - name: Beads audit log is append-only (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/check-audit-append-only.sh "$BASE_SHA"
+      - name: Beads audit log is append-only (push)
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "New branch or tag; no previous revision to compare against."
+            exit 0
+          fi
+          scripts/check-audit-append-only.sh "$BEFORE_SHA"
       - name: Install checksum-pinned Gitleaks
         shell: bash
         run: |
@@ -55,7 +70,7 @@ jobs:
           unzip -q /tmp/duckdb-cli.zip -d /tmp/duckdb-cli
           sudo install -m 0755 /tmp/duckdb-cli/duckdb /usr/local/bin/duckdb
           duckdb --version
-      - run: bun test scripts/forensic-cache.test.ts scripts/mesh-mcp-snapshot.test.ts
+      - run: bun test scripts/forensic-cache.test.ts scripts/mesh-mcp-snapshot.test.ts scripts/beads-scripts.test.ts scripts/check-public-release.test.ts
 
   web:
     name: Web prototype

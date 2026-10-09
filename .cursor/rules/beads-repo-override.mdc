@@ -1,0 +1,21 @@
+---
+description: Repo-specific overrides of the bd-generated Beads rule
+alwaysApply: true
+---
+
+# Beads repo overrides
+
+This rule takes precedence over the bd-generated `beads.mdc` rule, which `bd setup`
+may rewrite. It is a separate file so those rewrites cannot drop it.
+
+- Durable work items go in `bd` (see AGENTS.md). In-session scratch todos
+  (TodoWrite, TaskCreate, or similar) and agent memory features remain allowed
+  for private scratch use; they are not shared project state, and anything
+  durable belongs in a ticket.
+- Never run a bare `bd dolt push`. Publishing ticket data is done only with
+  `scripts/bd-push.sh`, and only when the task or owner explicitly authorises
+  it. Every push publishes the whole tracker and its Dolt history to a public
+  remote, so never write internal ids, emails, phone numbers or secrets into a
+  ticket, even temporarily. Never force-push or replace `refs/dolt/data`.
+- Do not use `bd provenance record` in this repo; provenance uses the labels and
+  audit log described in AGENTS.md.
