@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import type { Subprocess } from 'bun'
 import { RecordId } from 'surrealdb'
-import { connectAdmin, connectWithToken, type Db } from '@/lib/db/client'
+import { connect, type Db } from '@/lib/db/client'
 import type { SurrealAdminConfig } from '@/lib/db/config'
 import { migrate } from '@/lib/db/migrate'
 import { setSignupEnabled } from '@/lib/db/settings'
@@ -84,7 +84,7 @@ export async function startTestDatabase(
     user: 'root',
     password,
   }
-  const admin = await connectAdmin(config)
+  const admin = await connect(config, { kind: 'root', user: config.user, password: config.password })
   if (options.migrate !== false) {
     await migrate(admin, config)
     await setSignupEnabled(admin, options.signup ?? true)
@@ -115,7 +115,7 @@ export async function createTestUser(database: TestDatabase, label = 'user'): Pr
   counter += 1
   const email = `${label}-${counter}@example.com`
   const token = await signUp(database.config, email, 'correct-horse-battery-1')
-  const db = await connectWithToken(database.config, token)
+  const db = await connect(database.config, { kind: 'token', token })
   const [id] = await db.query('RETURN $auth').collect<[RecordId]>()
   return { email, token, db, id }
 }

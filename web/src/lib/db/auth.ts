@@ -1,5 +1,5 @@
-import { NotAllowedError, NotFoundError, QueryError, ThrownError } from 'surrealdb'
-import { ACCESS_METHOD, connectAnonymous } from './client'
+import { NotAllowedError, NotFoundError, ThrownError } from 'surrealdb'
+import { ACCESS_METHOD, connect } from './client'
 import type { SurrealConfig } from './config'
 
 export type AuthErrorCode =
@@ -56,7 +56,7 @@ function accessToken(tokens: unknown): string {
 
 export async function signUp(config: SurrealConfig, email: unknown, password: unknown): Promise<string> {
   const credentials = validateCredentials(email, password)
-  const db = await connectAnonymous(config)
+  const db = await connect(config, { kind: 'anonymous' })
   try {
     const tokens = await db.signup({
       namespace: config.namespace,
@@ -67,11 +67,12 @@ export async function signUp(config: SurrealConfig, email: unknown, password: un
     return accessToken(tokens)
   } catch (error) {
     if (error instanceof ThrownError) {
-      const code = error.message.match(/invalid_(?:email|password_length|credentials)|signup_disabled/)?.[0]
+      const code = error.message.match(/invalid_(?:email|password_length|credentials)|signup_disabled|email_taken/)?.[0]
       if (code) throw new AuthError(code as AuthErrorCode)
     }
-    // The only other way the SIGNUP block fails is the unique email index.
-    if (error instanceof QueryError) throw new AuthError('email_taken')
+    // Anything else (including two sign-ups racing for one new address, which
+    // SurrealDB reports only as a generic failed query) is not a statement
+    // about the address, so it is not reported as one.
     throw error
   } finally {
     await db.close().catch(() => undefined)
@@ -86,7 +87,7 @@ export async function signIn(config: SurrealConfig, email: unknown, password: un
   ) {
     throw new AuthError('invalid_credentials')
   }
-  const db = await connectAnonymous(config)
+  const db = await connect(config, { kind: 'anonymous' })
   try {
     const tokens = await db.signin({
       namespace: config.namespace,
@@ -107,4 +108,15 @@ export async function signIn(config: SurrealConfig, email: unknown, password: un
   } finally {
     await db.close().catch(() => undefined)
   }
+}
+
+// A log-safe description of a failure. Credentials are scrubbed in case a
+// driver or server message echoes the request.
+export function describeError(error: unknown, secrets: unknown[] = []): string {
+  const name = error instanceof Error ? error.name : typeof error
+  let message = error instanceof Error ? error.message : String(error)
+  for (const secret of secrets) {
+    if (typeof secret === 'string' && secret.length > 0) message = message.split(secret).join('[redacted]')
+  }
+  return `${name}: ${message.slice(0, 300)}`
 }

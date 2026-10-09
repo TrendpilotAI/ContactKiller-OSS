@@ -8,6 +8,14 @@ describe('safeNextPath', () => {
     expect(safeNextPath('/settings#x')).toBe('/settings')
   })
 
+  test('a repeated ?next= (array) or any non-string falls back instead of throwing', () => {
+    expect(safeNextPath(['/contacts', '/settings'])).toBe('/contacts')
+    expect(safeNextPath(['//evil.example'])).toBe('/contacts')
+    expect(safeNextPath([], '/home')).toBe('/home')
+    expect(safeNextPath(['/settings'], '/home')).toBe('/home')
+    for (const odd of [42, {}, null, true, Symbol('x')]) expect(safeNextPath(odd)).toBe('/contacts')
+  })
+
   test('falls back for missing and relative values', () => {
     expect(safeNextPath(undefined)).toBe('/contacts')
     expect(safeNextPath('')).toBe('/contacts')

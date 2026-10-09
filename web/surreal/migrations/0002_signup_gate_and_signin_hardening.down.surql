@@ -1,19 +1,9 @@
--- Rollback for 0002. This restores the original unconditional SIGNUP clause;
--- do not leave a shared database in that state.
+-- Rollback for 0002. The sign-up switch it introduced is removed, but rolling
+-- back must never reopen registration, so SIGNUP keeps refusing everyone until
+-- 0002 is applied again. SIGNIN returns to the original, unhardened clause.
 DEFINE ACCESS OVERWRITE account ON DATABASE TYPE RECORD
   SIGNUP {
-    IF type::is_string($email) = false OR type::is_string($password) = false {
-      THROW "invalid_credentials";
-    };
-    IF string::is_email($email) = false {
-      THROW "invalid_email";
-    };
-    IF string::len($password) < 12 OR string::len($password) > 256 {
-      THROW "invalid_password_length";
-    };
-    RETURN (CREATE app_user SET
-      email = string::lowercase(string::trim($email)),
-      password_hash = crypto::argon2::generate($password));
+    THROW "signup_disabled";
   }
   SIGNIN (
     SELECT * FROM app_user

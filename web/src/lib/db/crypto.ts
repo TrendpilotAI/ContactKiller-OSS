@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 const VERSION = 'v1'
 const KEY_BYTES = 32
 const IV_BYTES = 12
+const TAG_BYTES = 16
 
 export const TOKEN_KEY_ENV = 'CONTACTKILLER_TOKEN_ENCRYPTION_KEY'
 
@@ -28,7 +29,7 @@ export function getEncryptionKey(env: Record<string, string | undefined> = proce
 // means a ciphertext copied to another user or provider fails to decrypt.
 export function encryptSecret(plaintext: string, key: Buffer, context: string): string {
   const iv = randomBytes(IV_BYTES)
-  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES })
   cipher.setAAD(Buffer.from(context, 'utf8'))
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
   const tag = cipher.getAuthTag()
@@ -42,9 +43,16 @@ export function decryptSecret(payload: string, key: Buffer, context: string): st
   if (version !== VERSION || !iv || !tag || !ciphertext || rest.length > 0) {
     throw new Error('Unsupported encrypted secret format.')
   }
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'))
+  const ivBytes = Buffer.from(iv, 'base64url')
+  const tagBytes = Buffer.from(tag, 'base64url')
+  // GCM accepts shortened tags unless the length is pinned, which would let an
+  // attacker weaken authentication by truncating the stored tag.
+  if (ivBytes.length !== IV_BYTES || tagBytes.length !== TAG_BYTES) {
+    throw new Error('Unsupported encrypted secret format.')
+  }
+  const decipher = createDecipheriv('aes-256-gcm', key, ivBytes, { authTagLength: TAG_BYTES })
   decipher.setAAD(Buffer.from(context, 'utf8'))
-  decipher.setAuthTag(Buffer.from(tag, 'base64url'))
+  decipher.setAuthTag(tagBytes)
   return Buffer.concat([
     decipher.update(Buffer.from(ciphertext, 'base64url')),
     decipher.final(),

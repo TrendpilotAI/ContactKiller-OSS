@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic'
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string }>
+  searchParams: Promise<{ next?: string | string[] }>
 }) {
   const { next } = await searchParams
   const session = await openSession().catch(() => null)

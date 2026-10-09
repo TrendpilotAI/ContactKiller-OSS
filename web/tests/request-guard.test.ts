@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  MAX_AUTH_JSON_BYTES,
   MAX_FORM_BYTES,
+  MAX_JSON_BYTES,
   checkOrigin,
   guardRequest,
   readLimitedFormData,
+  readLimitedJson,
   requireJson,
 } from '@/lib/request-guard'
 
@@ -110,5 +113,73 @@ describe('limited form reader', () => {
     })
     expect(await readLimitedFormData(json, MAX_FORM_BYTES)).toBeNull()
     expect(await readLimitedFormData(new Request('http://localhost:3000/x', { method: 'POST' }), MAX_FORM_BYTES)).toBeNull()
+  })
+})
+
+describe('limited JSON reader', () => {
+  const jsonPost = (body: BodyInit | null, headers: Record<string, string> = {}) =>
+    new Request('http://localhost:3000/api/x', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body,
+      duplex: 'half',
+    } as RequestInit)
+
+  const streamOf = (chunks: number, size: number) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < chunks; i += 1) controller.enqueue(new Uint8Array(size).fill(0x20))
+        controller.close()
+      },
+    })
+
+  test('parses JSON within the cap', async () => {
+    const result = await readLimitedJson(jsonPost('{"a":[1,2,{"b":null}]}'), 1000)
+    expect(result).toEqual({ ok: true, value: { a: [1, 2, { b: null }] } })
+  })
+
+  test('answers 413 from Content-Length without touching the body', async () => {
+    const request = {
+      headers: new Headers({ 'content-length': String(MAX_AUTH_JSON_BYTES + 1) }),
+      get body(): never {
+        throw new Error('body must not be read')
+      },
+    } as unknown as Request
+    const result = await readLimitedJson(request, MAX_AUTH_JSON_BYTES)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.response.status).toBe(413)
+  })
+
+  test('answers 413 when a streamed body without Content-Length exceeds the cap', async () => {
+    const result = await readLimitedJson(jsonPost(streamOf(20, 1000)), 4000)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.response.status).toBe(413)
+  })
+
+  test('answers 413 when Content-Length understates the body', async () => {
+    const result = await readLimitedJson(jsonPost(streamOf(20, 1000), { 'content-length': '10' }), 4000)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.response.status).toBe(413)
+  })
+
+  test('a body exactly at the cap is accepted, one byte over is not', async () => {
+    const exact = `"${'x'.repeat(98)}"`
+    expect(exact.length).toBe(100)
+    expect((await readLimitedJson(jsonPost(exact), 100)).ok).toBe(true)
+    expect((await readLimitedJson(jsonPost(`${exact} `), 100)).ok).toBe(false)
+  })
+
+  test('answers 400 for malformed, empty, or non-UTF-8 JSON', async () => {
+    for (const body of ['{"a":', '', 'not json', new Uint8Array([0x22, 0xff, 0xfe, 0x22])]) {
+      const result = await readLimitedJson(jsonPost(body))
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.response.status).toBe(400)
+    }
+  })
+
+  test('the default cap is generous but bounded', async () => {
+    expect(MAX_JSON_BYTES).toBeGreaterThan(MAX_AUTH_JSON_BYTES)
+    const result = await readLimitedJson(jsonPost(streamOf(300, 1000)))
+    expect(result.ok).toBe(false)
   })
 })

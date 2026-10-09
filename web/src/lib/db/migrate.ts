@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Db } from './client'
+import { runTransaction, type Db } from './client'
 import type { SurrealConfig } from './config'
 
 export const MIGRATIONS_DIR = join(import.meta.dirname, '..', '..', '..', 'surreal', 'migrations')
@@ -125,15 +125,14 @@ export async function migrate(
       continue
     }
     // The schema and its bookkeeping row commit together or not at all.
-    await db
-      .query(
-        `BEGIN;
-         ${file.sql}
-         CREATE migration SET name = $name, checksum = $checksum;
-         COMMIT;`,
-        { name: file.name, checksum: file.checksum }
-      )
-      .collect()
+    await runTransaction(
+      db,
+      `BEGIN;
+       ${file.sql}
+       CREATE migration SET name = $name, checksum = $checksum;
+       COMMIT;`,
+      { name: file.name, checksum: file.checksum }
+    )
     result.applied.push(file.name)
   }
   return result
@@ -170,14 +169,13 @@ export async function rollbackLatest(
   if (!downFile) throw new Error(`No rollback file (${latest.name}.down.surql) for migration ${latest.name}.`)
   const sql = normalizeLineEndings(await readFile(join(dir, downFile), 'utf8'))
   assertNoTransactionStatements(downFile, sql)
-  await db
-    .query(
-      `BEGIN;
-       ${sql}
-       DELETE migration WHERE name = $name;
-       COMMIT;`,
-      { name: latest.name }
-    )
-    .collect()
+  await runTransaction(
+    db,
+    `BEGIN;
+     ${sql}
+     DELETE migration WHERE name = $name;
+     COMMIT;`,
+    { name: latest.name }
+  )
   return latest.name
 }

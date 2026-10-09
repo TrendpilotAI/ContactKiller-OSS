@@ -61,6 +61,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         updated: result.updated,
         conflicts: result.conflicts,
         skipped: result.skipped.length > 0 ? result.skipped : undefined,
+        sharedEmailContacts: result.sharedEmailContacts > 0 ? result.sharedEmailContacts : undefined,
         errors: result.errors.length > 0 ? result.errors : undefined,
       })
     } catch (err) {

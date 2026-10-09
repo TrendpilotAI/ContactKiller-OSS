@@ -25,6 +25,22 @@ describe('token encryption', () => {
     expect(() => decryptSecret(parts.join('.'), key, 'owner-a:google')).toThrow()
   })
 
+  test('pins the tag and IV lengths', () => {
+    const sealed = encryptSecret('synthetic-access-token', key, 'ctx')
+    const [version, iv, tag, ciphertext] = sealed.split('.')
+    expect(Buffer.from(tag, 'base64url')).toHaveLength(16)
+
+    const shortTag = Buffer.from(tag, 'base64url').subarray(0, 8).toString('base64url')
+    expect(() => decryptSecret([version, iv, shortTag, ciphertext].join('.'), key, 'ctx')).toThrow('Unsupported encrypted secret format')
+    const oneByte = Buffer.from(tag, 'base64url').subarray(0, 1).toString('base64url')
+    expect(() => decryptSecret([version, iv, oneByte, ciphertext].join('.'), key, 'ctx')).toThrow('Unsupported encrypted secret format')
+    const longTag = Buffer.concat([Buffer.from(tag, 'base64url'), Buffer.alloc(4)]).toString('base64url')
+    expect(() => decryptSecret([version, iv, longTag, ciphertext].join('.'), key, 'ctx')).toThrow('Unsupported encrypted secret format')
+    const shortIv = Buffer.from(iv, 'base64url').subarray(0, 8).toString('base64url')
+    expect(() => decryptSecret([version, shortIv, tag, ciphertext].join('.'), key, 'ctx')).toThrow('Unsupported encrypted secret format')
+    expect(() => decryptSecret([version, iv, '', ciphertext].join('.'), key, 'ctx')).toThrow('Unsupported encrypted secret format')
+  })
+
   test('rejects unknown formats', () => {
     expect(() => decryptSecret('plaintext', key, 'ctx')).toThrow('Unsupported encrypted secret format')
     expect(() => decryptSecret('v2.a.b.c', key, 'ctx')).toThrow('Unsupported encrypted secret format')

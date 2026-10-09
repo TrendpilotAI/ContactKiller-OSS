@@ -88,7 +88,7 @@ export async function importVcf(db: Db, userId: RecordId, vcfContent: string): P
         },
         emails: emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
         phones: phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
-        links: [{ platform: 'icloud', platform_id: `icloud-import-${Date.now()}-${result.imported}` }],
+        links: [{ platform: 'icloud', platform_id: `icloud-import-${crypto.randomUUID()}` }],
       })
 
       for (const e of emails) {

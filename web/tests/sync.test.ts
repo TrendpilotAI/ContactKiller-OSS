@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { people_v1 } from 'googleapis'
+import { RecordId } from 'surrealdb'
 import { createContact, getContact, listContacts } from '@/lib/db/contacts'
 import { FA_EMAIL_DOMAINS } from '@/lib/fa-detection'
 import { finishSyncLog, startSyncLog } from '@/lib/db/sync-logs'
@@ -69,7 +70,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
 
     test('imports new contacts with emails, phones, links, and advisor detection', async () => {
       const result = await reconcileGoogleContacts(alice.db, alice.id, [maya, advisor])
-      expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [] })
+      expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
 
       const contacts = await listContacts(alice.db)
       const imported = contacts.find((c) => c.first_name === 'Maya')!
@@ -92,9 +93,9 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
     test('is idempotent: re-running changes nothing and files no duplicate conflicts', async () => {
       const changed: Person = { ...maya, organizations: [{ name: 'Renamed Studio', title: 'Lead' }] }
       const first = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
-      expect(first).toEqual({ imported: 0, updated: 2, conflicts: 2, errors: [], skipped: [] })
+      expect(first).toEqual({ imported: 0, updated: 2, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
       const second = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
-      expect(second).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [] })
+      expect(second).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
 
       expect(await listContacts(alice.db)).toHaveLength(2)
       expect(await conflictsFor(alice)).toHaveLength(2)
@@ -119,7 +120,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
             organizations: [{ name: 'Google Studio', title: 'Designer' }],
           },
         ])
-        expect(result).toEqual({ imported: 0, updated: 1, conflicts: 2, errors: [], skipped: [] })
+        expect(result).toEqual({ imported: 0, updated: 1, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
 
         const contact = (await getContact(user.db, id))!
         expect(contact).toMatchObject({
@@ -185,7 +186,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           { resourceName: 'people/x2', names: [{ displayName: 'P' }], phoneNumbers: [{ value: '+1 202 555 0143' }] },
           { resourceName: 'people/x3', names: [{ displayName: 'I' }], emailAddresses: [{ value: 'changed@example.com' }] },
         ])
-        expect(result).toEqual({ imported: 0, updated: 3, conflicts: 0, errors: [], skipped: [] })
+        expect(result).toEqual({ imported: 0, updated: 3, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
         expect((await getContact(user.db, byEmail))!.platform_links[0].platform_id).toBe('people/x1')
         expect((await getContact(user.db, byPhone))!.platform_links[0].platform_id).toBe('people/x2')
         expect((await getContact(user.db, byId))!.platform_links[0].platform_id).toBe('people/x3')
@@ -244,38 +245,73 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
     })
 
     describe('ambiguity never links or merges', () => {
-      test('one email shared by two Google contacts: neither is linked to the local contact', async () => {
+      test('one email shared by two Google contacts: each is imported on its own and none touches the local contact', async () => {
         const user = await fresh('shared')
         try {
           const id = await seedLocal(user, { display_name: 'Local Owner', company: 'Mine' }, { emails: ['shared@example.com'] })
-          const result = await reconcileGoogleContacts(user.db, user.id, [
+          const people: Person[] = [
             { resourceName: 'people/s1', names: [{ displayName: 'First' }], emailAddresses: [{ value: 'shared@example.com' }], organizations: [{ name: 'One' }] },
             { resourceName: 'people/s2', names: [{ displayName: 'Second' }], emailAddresses: [{ value: 'SHARED@example.com' }], organizations: [{ name: 'Two' }] },
-          ])
-          expect(result).toMatchObject({ imported: 0, updated: 0, conflicts: 0, errors: [] })
-          expect(result.skipped).toHaveLength(2)
-          expect(result.skipped[0]).toContain('shared by more than one Google contact')
+          ]
+          const result = await reconcileGoogleContacts(user.db, user.id, people)
+          expect(result).toEqual({ imported: 2, updated: 0, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 2 })
 
-          const contact = (await getContact(user.db, id))!
-          expect(contact).toMatchObject({ display_name: 'Local Owner', company: 'Mine' })
-          expect(contact.platform_links).toEqual([])
-          expect(await listContacts(user.db)).toHaveLength(1)
-          expect(await conflictsFor(user)).toEqual([])
+          const local = (await getContact(user.db, id))!
+          expect(local).toMatchObject({ display_name: 'Local Owner', company: 'Mine' })
+          expect(local.platform_links).toEqual([])
+
+          const contacts = await listContacts(user.db)
+          expect(contacts).toHaveLength(3)
+          const first = contacts.find((c) => c.display_name === 'First')!
+          const second = contacts.find((c) => c.display_name === 'Second')!
+          expect(first.id).not.toBe(second.id)
+          expect(first.company).toBe('One')
+          expect(second.company).toBe('Two')
+          expect(first.platform_links.map((l) => l.platform_id)).toEqual(['people/s1'])
+          expect(second.platform_links.map((l) => l.platform_id)).toEqual(['people/s2'])
+
+          // Each new contact carries a conflict so the duplicate is visible.
+          const [filed] = await user.db
+            .query('SELECT contact, field, value_a, source_a, source_b FROM conflict ORDER BY contact')
+            .collect<[{ contact: { id: unknown }; field: string; value_a: string }[]]>()
+          expect(filed.map((row) => [row.field, row.value_a]).sort()).toEqual([
+            ['shared_email', 'shared@example.com'],
+            ['shared_email', 'shared@example.com'],
+          ])
+          expect(new Set(filed.map((row) => String(row.contact.id)))).toEqual(new Set([first.id, second.id]))
         } finally {
           await user.db.close()
         }
       })
 
-      test('one email shared by two new Google contacts creates neither', async () => {
-        const user = await fresh('sharednew')
+      test('re-running with a shared email changes nothing and files nothing new', async () => {
+        const user = await fresh('sharedrerun')
         try {
+          const people: Person[] = [
+            { resourceName: 'people/r1', names: [{ displayName: 'Twin A' }], emailAddresses: [{ value: 'twins@example.com' }] },
+            { resourceName: 'people/r2', names: [{ displayName: 'Twin B' }], emailAddresses: [{ value: 'twins@example.com' }] },
+          ]
+          expect(await reconcileGoogleContacts(user.db, user.id, people)).toMatchObject({ imported: 2, conflicts: 2, sharedEmailContacts: 2 })
+          const again = await reconcileGoogleContacts(user.db, user.id, people)
+          expect(again).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+          expect(await listContacts(user.db)).toHaveLength(2)
+          expect(await conflictsFor(user)).toHaveLength(2)
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('the shared address is not a match key, but their other exact identifiers still are', async () => {
+        const user = await fresh('sharedphone')
+        try {
+          const byPhone = await seedLocal(user, { display_name: 'Phone Match' }, { emails: ['team@example.com'], phones: ['(202) 555-0143'] })
           const result = await reconcileGoogleContacts(user.db, user.id, [
-            { resourceName: 'people/t1', names: [{ displayName: 'Twin A' }], emailAddresses: [{ value: 'twins@example.com' }] },
-            { resourceName: 'people/t2', names: [{ displayName: 'Twin B' }], emailAddresses: [{ value: 'twins@example.com' }] },
+            { resourceName: 'people/q1', names: [{ displayName: 'Phone Match' }], emailAddresses: [{ value: 'team@example.com' }], phoneNumbers: [{ value: '+1 202 555 0143' }] },
+            { resourceName: 'people/q2', names: [{ displayName: 'Other Teammate' }], emailAddresses: [{ value: 'team@example.com' }] },
           ])
-          expect(result).toMatchObject({ imported: 0, updated: 0 })
-          expect(result.skipped).toHaveLength(2)
-          expect(await listContacts(user.db)).toEqual([])
+          expect(result).toMatchObject({ imported: 1, updated: 1, skipped: [] })
+          expect((await getContact(user.db, byPhone))!.platform_links.map((l) => l.platform_id)).toEqual(['people/q1'])
+          expect(await listContacts(user.db)).toHaveLength(2)
         } finally {
           await user.db.close()
         }
@@ -347,6 +383,109 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
       })
     })
 
+    describe('concurrent syncs', () => {
+      const roster = (count: number): Person[] =>
+        Array.from({ length: count }, (_, index) => ({
+          resourceName: `people/race${index}`,
+          names: [{ displayName: `Race ${index}` }],
+          emailAddresses: [{ value: `race${index}@example.com` }],
+        }))
+
+      const linksFor = async (user: TestUser) => {
+        const [rows] = await user.db.query('SELECT platform_id FROM platform_link').collect<[{ platform_id: string }[]]>()
+        return rows.map((row) => row.platform_id)
+      }
+
+      test('the database refuses a second link for one provider identity, even on another contact', async () => {
+        const user = await fresh('unique')
+        try {
+          const first = await seedLocal(user, { display_name: 'First' }, { googleId: 'people/same' })
+          const second = await seedLocal(user, { display_name: 'Second' })
+          await expect(
+            user.db
+              .query('CREATE platform_link CONTENT { owner: $owner, contact: $contact, platform: "google", platform_id: "people/same" }', {
+                owner: user.id,
+                contact: new RecordId('contact', second),
+              })
+              .collect()
+          ).rejects.toThrow(/already contains/)
+          expect((await getContact(user.db, first))!.platform_links).toHaveLength(1)
+          expect((await getContact(user.db, second))!.platform_links).toEqual([])
+
+          // Another user may legitimately hold the same provider id.
+          const other = await fresh('unique-other')
+          try {
+            await seedLocal(other, { display_name: 'Elsewhere' }, { googleId: 'people/same' })
+          } finally {
+            await other.db.close()
+          }
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a sync that loses the race adopts the contact that won instead of failing', async () => {
+        const user = await fresh('lostrace')
+        try {
+          const people = roster(5)
+          // The second sync reads the (still empty) identity index, then waits
+          // until the first sync has finished before it starts writing.
+          let release: () => void = () => undefined
+          const firstDone = new Promise<void>((resolve) => {
+            release = resolve
+          })
+          const stale = new Proxy(user.db, {
+            get(target, property) {
+              const value = Reflect.get(target, property, target)
+              if (property !== 'query') return typeof value === 'function' ? value.bind(target) : value
+              return (sql: string, vars?: Record<string, unknown>) => {
+                const query = target.query(sql, vars)
+                if (!sql.includes('FROM platform_link WHERE owner')) return query
+                return {
+                  collect: async (...args: number[]) => {
+                    const rows = await query.collect(...args)
+                    await firstDone
+                    return rows
+                  },
+                }
+              }
+            },
+          }) as typeof user.db
+
+          const losing = reconcileGoogleContacts(stale, user.id, people)
+          await Bun.sleep(100)
+          const winner = await reconcileGoogleContacts(user.db, user.id, people)
+          release()
+          const loser = await losing
+
+          expect(winner).toMatchObject({ imported: 5, updated: 0, errors: [] })
+          expect(loser).toMatchObject({ imported: 0, updated: 5, errors: [], skipped: [] })
+          expect(await listContacts(user.db)).toHaveLength(5)
+          expect((await linksFor(user)).sort()).toEqual(people.map((p) => p.resourceName!).sort())
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('truly parallel syncs create each Google contact exactly once', async () => {
+        const user = await fresh('parallel')
+        try {
+          const people = roster(30)
+          const runs = await Promise.all([
+            reconcileGoogleContacts(user.db, user.id, people),
+            reconcileGoogleContacts(user.db, user.id, people),
+            reconcileGoogleContacts(user.db, user.id, people),
+          ])
+          for (const run of runs) expect(run.errors).toEqual([])
+          expect(runs.reduce((sum, run) => sum + run.imported, 0)).toBe(30)
+          expect(await listContacts(user.db, { limit: 500 })).toHaveLength(30)
+          expect((await linksFor(user)).sort()).toEqual(people.map((p) => p.resourceName!).sort())
+        } finally {
+          await user.db.close()
+        }
+      })
+    })
+
     test("one user's import never matches or touches another user's contacts", async () => {
       const before = await listContacts(alice.db)
       const result = await reconcileGoogleContacts(bob.db, bob.id, [maya])
@@ -362,7 +501,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           { names: [{ displayName: 'No Resource Name' }] },
           { resourceName: 'people/c4002', names: [{ displayName: 'Fine Two' }] },
         ])
-        expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [] })
+        expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
         expect(await listContacts(carol.db)).toHaveLength(2)
       } finally {
         await carol.db.close()

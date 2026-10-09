@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { deleteContact, getContact, updateContact } from '@/lib/db/contacts'
 import { InvalidRecordKeyError } from '@/lib/db/client'
 import { withSession } from '@/lib/db/session'
-import { guardRequest } from '@/lib/request-guard'
+import { MAX_PATCH_JSON_BYTES, guardRequest, readLimitedJson } from '@/lib/request-guard'
 import { parseContactPatch } from '@/lib/contact-input'
 
 type RouteContext = { params: Promise<{ id: string }> }
@@ -32,7 +32,9 @@ export async function PATCH(request: NextRequest, { params }: RouteContext) {
   const { id } = await params
 
   return withSession(async ({ db }) => {
-    const parsed = parseContactPatch(await request.json().catch(() => null))
+    const json = await readLimitedJson(request, MAX_PATCH_JSON_BYTES)
+    if (!json.ok) return json.response
+    const parsed = parseContactPatch(json.value)
     if (!parsed.ok) {
       return NextResponse.json({ error: parsed.error }, { status: 400 })
     }

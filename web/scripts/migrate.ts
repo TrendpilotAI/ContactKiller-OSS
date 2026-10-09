@@ -1,4 +1,4 @@
-import { connectAdmin } from '../src/lib/db/client'
+import { connect } from '../src/lib/db/client'
 import { getSurrealAdminConfig, isSignupEnabled } from '../src/lib/db/config'
 import { migrate, rollbackLatest } from '../src/lib/db/migrate'
 import { setSignupEnabled } from '../src/lib/db/settings'
@@ -10,7 +10,7 @@ if (command !== 'up' && command !== 'down') {
 }
 
 const config = getSurrealAdminConfig()
-const db = await connectAdmin(config)
+const db = await connect(config, { kind: 'root', user: config.user, password: config.password })
 try {
   if (command === 'up') {
     const { applied, skipped } = await migrate(db, config)

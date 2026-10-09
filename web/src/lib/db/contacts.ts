@@ -1,5 +1,5 @@
 import type { RecordId } from 'surrealdb'
-import { lastDefined, parseDateTime, recordId, toPlain, type Db } from './client'
+import { lastDefined, parseDateTime, recordId, runTransaction, toPlain, type Db } from './client'
 import type { ContactDto, ContactFilter, Platform } from './types'
 
 export const DEFAULT_PAGE_SIZE = 100
@@ -65,7 +65,9 @@ export function clampLimit(raw: number | undefined): number {
 }
 
 export async function listContacts(db: Db, options: ListContactsOptions = {}): Promise<ContactDto[]> {
-  const conditions: string[] = []
+  // Owner scoping is repeated in the query so the owner indexes are used;
+  // table permissions remain the actual guard.
+  const conditions: string[] = ['owner = $auth']
   const vars: Record<string, unknown> = { limit: clampLimit(options.limit) }
 
   if (options.filter === 'personal') conditions.push('is_financial_advisor = false')
@@ -86,7 +88,7 @@ export async function listContacts(db: Db, options: ListContactsOptions = {}): P
     conditions.push('updated_at < $cursor')
   }
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  const where = `WHERE ${conditions.join(' AND ')}`
   const [rows] = await db
     .query(
       `SELECT ${CONTACT_PROJECTION} FROM contact ${where} ORDER BY updated_at DESC LIMIT $limit`,
@@ -98,7 +100,7 @@ export async function listContacts(db: Db, options: ListContactsOptions = {}): P
 
 export async function getContact(db: Db, key: string): Promise<ContactDto | null> {
   const [rows] = await db
-    .query(`SELECT ${CONTACT_PROJECTION} FROM contact WHERE id = $id`, {
+    .query(`SELECT ${CONTACT_PROJECTION} FROM $id`, {
       id: recordId('contact', key),
     })
     .collect<[unknown[]]>()
@@ -108,8 +110,8 @@ export async function getContact(db: Db, key: string): Promise<ContactDto | null
 export async function countContacts(db: Db): Promise<{ total: number; financialAdvisors: number }> {
   const [total, advisors] = await db
     .query(
-      `SELECT count() AS n FROM contact GROUP ALL;
-       SELECT count() AS n FROM contact WHERE is_financial_advisor = true GROUP ALL`
+      `SELECT count() AS n FROM contact WHERE owner = $auth GROUP ALL;
+       SELECT count() AS n FROM contact WHERE owner = $auth AND is_financial_advisor = true GROUP ALL`
     )
     .collect<[{ n: number }[], { n: number }[]]>()
   return { total: total[0]?.n ?? 0, financialAdvisors: advisors[0]?.n ?? 0 }
@@ -142,8 +144,7 @@ function channels(values: ChannelInput[] | undefined, fallbackLabel: string) {
 // Creates a contact and all of its children atomically: either every row is
 // written or none is.
 export async function createContact(db: Db, owner: RecordId, input: NewContact): Promise<string> {
-  const results = await db
-    .query(CREATE_CONTACT_SQL, {
+  const results = await runTransaction(db, CREATE_CONTACT_SQL, {
       owner,
       content: {
         owner,
@@ -159,7 +160,6 @@ export async function createContact(db: Db, owner: RecordId, input: NewContact):
       phones: channels(input.phones, 'mobile'),
       links: input.links ?? [],
     })
-    .collect()
   const id = lastDefined<RecordId>(results)
   if (!id) throw new Error('Contact creation returned no id.')
   return String(id.id)
@@ -186,14 +186,14 @@ export async function updateContact(db: Db, key: string, patch: ContactPatch): P
     assignments.push('updated_at = time::now()')
   }
   const [rows] = await db
-    .query(`UPDATE contact SET ${assignments.join(', ')} WHERE id = $id RETURN id`, vars)
+    .query(`UPDATE $id SET ${assignments.join(', ')} RETURN id`, vars)
     .collect<[unknown[]]>()
   return rows.length > 0
 }
 
 export async function deleteContact(db: Db, key: string): Promise<boolean> {
   const [rows] = await db
-    .query('DELETE contact WHERE id = $id RETURN BEFORE', { id: recordId('contact', key) })
+    .query('DELETE $id RETURN BEFORE', { id: recordId('contact', key) })
     .collect<[unknown[]]>()
   return rows.length > 0
 }
@@ -204,7 +204,7 @@ export async function bulkSetFinancialAdvisor(
   isFinancialAdvisor: boolean
 ): Promise<string[]> {
   const [rows] = await db
-    .query('UPDATE contact SET is_financial_advisor = $flag WHERE id IN $ids RETURN id', {
+    .query('UPDATE $ids SET is_financial_advisor = $flag RETURN id', {
       flag: isFinancialAdvisor,
       ids: keys.map((key) => recordId('contact', key)),
     })
@@ -226,9 +226,9 @@ export interface IdentityIndex {
 export async function loadIdentityIndex(db: Db): Promise<IdentityIndex> {
   const [emails, phones, links] = await db
     .query(
-      `SELECT contact, email_lower FROM email;
-       SELECT contact, phone FROM phone;
-       SELECT contact, platform_id FROM platform_link WHERE platform = 'google'`
+      `SELECT contact, email_lower FROM email WHERE owner = $auth;
+       SELECT contact, phone FROM phone WHERE owner = $auth;
+       SELECT contact, platform_id FROM platform_link WHERE owner = $auth AND platform = 'google'`
     )
     .collect<[
       { contact: RecordId; email_lower: string }[],
@@ -248,6 +248,57 @@ export async function loadIdentityIndex(db: Db): Promise<IdentityIndex> {
     googleIds: new Map(links.map((row) => [row.platform_id, String(row.contact.id)])),
     googleLinkByContact: new Map(links.map((row) => [String(row.contact.id), row.platform_id])),
   }
+}
+
+export interface ConflictEntry {
+  field: string
+  value_a: string
+  value_b: string
+  source_a: string
+  source_b: string
+}
+
+// Files conflicts for a contact, skipping any that are already on record (open
+// or resolved), so repeating a sync never re-raises a disagreement. Returns how
+// many were new.
+export async function fileConflictsOnce(
+  db: Db,
+  owner: RecordId,
+  key: string,
+  entries: ConflictEntry[]
+): Promise<number> {
+  if (entries.length === 0) return 0
+  const id = recordId('contact', key)
+  const [existing] = await db
+    .query('SELECT field, value_a, value_b FROM conflict WHERE owner = $auth AND contact = $id', { id })
+    .collect<[{ field: string; value_a: string | null; value_b: string | null }[]]>()
+  const fresh = entries.filter(
+    (entry) =>
+      !existing.some(
+        (row) => row.field === entry.field && row.value_a === entry.value_a && row.value_b === entry.value_b
+      )
+  )
+  if (fresh.length === 0) return 0
+  await runTransaction(
+    db,
+    `BEGIN;
+     FOR $c IN $entries {
+       CREATE conflict CONTENT {
+         owner: $owner, contact: $id, field: $c.field,
+         value_a: $c.value_a, value_b: $c.value_b,
+         source_a: $c.source_a, source_b: $c.source_b
+       };
+     };
+     COMMIT;`,
+    { owner, id, entries: fresh }
+  )
+  return fresh.length
+}
+
+// SurrealDB reports a violated UNIQUE index as "Database index `x` already
+// contains ...".
+export function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Error && /Database index .* already contains/.test(error.message)
 }
 
 export const MERGE_FIELDS = ['first_name', 'last_name', 'display_name', 'company', 'job_title'] as const
@@ -291,8 +342,8 @@ export async function mergeImportedContact(
   const id = recordId('contact', key)
   const [contacts, existingConflicts] = await db
     .query(
-      `SELECT first_name, last_name, display_name, company, job_title FROM contact WHERE id = $id;
-       SELECT field, value_a, value_b FROM conflict WHERE contact = $id`,
+      `SELECT first_name, last_name, display_name, company, job_title FROM $id;
+       SELECT field, value_a, value_b FROM conflict WHERE owner = $auth AND contact = $id`,
       { id }
     )
     .collect<[
@@ -334,10 +385,10 @@ export async function mergeImportedContact(
     return `${field} = IF ${blankSql(field)} { $fill_${field} } ELSE { ${field} }`
   })
 
-  await db
-    .query(
-      `BEGIN;
-       ${assignments.length > 0 ? `UPDATE contact SET ${assignments.join(', ')} WHERE id = $id;` : ''}
+  await runTransaction(
+    db,
+    `BEGIN;
+       ${assignments.length > 0 ? `UPDATE $id SET ${assignments.join(', ')};` : ''}
        FOR $c IN $conflicts {
          CREATE conflict CONTENT {
            owner: $owner, contact: $id, field: $c.field,
@@ -350,8 +401,7 @@ export async function mergeImportedContact(
          platform_id: $link.platform_id, last_synced_at: time::now()
        } ON DUPLICATE KEY UPDATE last_synced_at = $input.last_synced_at;
        COMMIT;`,
-      vars
-    )
-    .collect()
+    vars
+  )
   return { filled, conflicts: conflicts.map((conflict) => conflict.field) }
 }

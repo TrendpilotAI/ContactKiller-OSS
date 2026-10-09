@@ -1,7 +1,15 @@
 import { google, people_v1 } from 'googleapis'
 import type { RecordId } from 'surrealdb'
 import type { Db } from '@/lib/db/client'
-import { createContact, loadIdentityIndex, mergeImportedContact, type ImportedFields } from '@/lib/db/contacts'
+import {
+  createContact,
+  fileConflictsOnce,
+  isUniqueViolation,
+  loadIdentityIndex,
+  mergeImportedContact,
+  type ConflictEntry,
+  type ImportedFields,
+} from '@/lib/db/contacts'
 import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
 import { parsePhoneNumber } from 'libphonenumber-js'
 
@@ -16,6 +24,9 @@ export interface SyncResult {
   errors: string[]
   // Google contacts deliberately not linked or merged, with the reason.
   skipped: string[]
+  // Contacts imported on their own because their email is on several Google
+  // contacts; each has a `shared_email` conflict to review.
+  sharedEmailContacts: number
 }
 
 // Fetch all contacts from Google using pagination
@@ -75,6 +86,8 @@ interface Candidate {
   phones: { phone: string; label: string }[]
   emailKeys: string[]
   phoneKeys: string[]
+  // Filled in once the whole batch is known.
+  sharedEmails: string[]
 }
 
 type Decision =
@@ -114,6 +127,7 @@ function toCandidate(gc: people_v1.Schema$Person): Candidate | null {
     phones,
     emailKeys: [...new Set(emails.map(e => e.email.trim().toLowerCase()))],
     phoneKeys: [...new Set(phones.map(p => normalizePhone(p.phone)).filter((p): p is string => p !== null))],
+    sharedEmails: [],
   }
 }
 
@@ -140,6 +154,7 @@ export async function reconcileGoogleContacts(
     conflicts: 0,
     errors: [],
     skipped: [],
+    sharedEmailContacts: 0,
   }
 
   const seen = new Set<string>()
@@ -163,6 +178,9 @@ export async function reconcileGoogleContacts(
     }
   }
   const emailOwners = owners(candidates, c => c.emailKeys)
+  for (const candidate of candidates) {
+    candidate.sharedEmails = candidate.emailKeys.filter(email => (emailOwners.get(email)?.size ?? 0) > 1)
+  }
   const phoneOwners = owners(candidates, c => c.phoneKeys)
 
   // Pass 1: decide, using only exact identifiers and only against what existed
@@ -175,16 +193,11 @@ export async function reconcileGoogleContacts(
       continue
     }
 
-    if (candidate.emailKeys.some(email => (emailOwners.get(email)?.size ?? 0) > 1)) {
-      decisions.set(candidate.googleId, {
-        kind: 'skip',
-        reason: 'an email address is shared by more than one Google contact',
-      })
-      continue
-    }
-
     const targets = new Set<string>()
+    // An address held by several Google contacts is not evidence that any of
+    // them is the local contact that has it, so it is never a match key.
     for (const email of candidate.emailKeys) {
+      if (candidate.sharedEmails.includes(email)) continue
       for (const contact of index.emails.get(email) ?? []) targets.add(contact)
     }
     // A phone shared by several Google contacts (a family landline) is not
@@ -236,6 +249,29 @@ export async function reconcileGoogleContacts(
   }
 
   // Pass 3: write.
+  const sharedEmailConflicts = (candidate: Candidate): ConflictEntry[] =>
+    candidate.sharedEmails.map(email => ({
+      field: 'shared_email',
+      value_a: email,
+      value_b: 'Also on other Google contacts',
+      source_a: 'google',
+      source_b: 'google',
+    }))
+
+  const updateExisting = async (candidate: Candidate, target: string) => {
+    const outcome = await mergeImportedContact(
+      db,
+      userId,
+      target,
+      candidate.fields,
+      { platform: 'google', platform_id: candidate.googleId },
+      { local: 'local', provider: 'google' }
+    )
+    result.conflicts += outcome.conflicts.length
+    result.conflicts += await fileConflictsOnce(db, userId, target, sharedEmailConflicts(candidate))
+    result.updated++
+  }
+
   for (const candidate of candidates) {
     const decision = decisions.get(candidate.googleId)!
     try {
@@ -244,28 +280,32 @@ export async function reconcileGoogleContacts(
         console.warn(`Google sync skipped ${message}`)
         result.skipped.push(message)
       } else if (decision.kind === 'update') {
-        const outcome = await mergeImportedContact(
-          db,
-          userId,
-          decision.target,
-          candidate.fields,
-          { platform: 'google', platform_id: candidate.googleId },
-          { local: 'local', provider: 'google' }
-        )
-        result.conflicts += outcome.conflicts.length
-        result.updated++
+        await updateExisting(candidate, decision.target)
       } else {
-        await createContact(db, userId, {
-          fields: {
-            ...candidate.fields,
-            display_name: candidate.fields.display_name || 'Unknown',
-            is_financial_advisor: isLikelyFinancialAdvisor(candidate.emails.map(e => e.email)),
-          },
-          emails: candidate.emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
-          phones: candidate.phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
-          links: [{ platform: 'google', platform_id: candidate.googleId }],
-        })
-        result.imported++
+        try {
+          const created = await createContact(db, userId, {
+            fields: {
+              ...candidate.fields,
+              display_name: candidate.fields.display_name || 'Unknown',
+              is_financial_advisor: isLikelyFinancialAdvisor(candidate.emails.map(e => e.email)),
+            },
+            emails: candidate.emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
+            phones: candidate.phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
+            links: [{ platform: 'google', platform_id: candidate.googleId }],
+          })
+          const filed = await fileConflictsOnce(db, userId, created, sharedEmailConflicts(candidate))
+          result.conflicts += filed
+          if (candidate.sharedEmails.length > 0) result.sharedEmailContacts++
+          result.imported++
+        } catch (err) {
+          // A concurrent sync created this Google contact first: the unique
+          // link index refused ours and rolled it back. Treat it as already
+          // linked and carry on with the contact that won.
+          if (!isUniqueViolation(err)) throw err
+          const winner = (await loadIdentityIndex(db)).googleIds.get(candidate.googleId)
+          if (!winner) throw err
+          await updateExisting(candidate, winner)
+        }
       }
     } catch (err) {
       result.errors.push(`Error processing contact: ${err}`)

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { InvalidCursorError, clampLimit, createContact, getContact, listContacts } from '@/lib/db/contacts'
 import { withSession } from '@/lib/db/session'
-import { guardRequest } from '@/lib/request-guard'
+import { guardRequest, readLimitedJson } from '@/lib/request-guard'
 import { parseNewContact } from '@/lib/contact-input'
 
 // GET /api/contacts - List all contacts
@@ -37,7 +37,9 @@ export async function POST(request: NextRequest) {
   if (blocked) return blocked
 
   return withSession(async ({ db, userId }) => {
-    const parsed = parseNewContact(await request.json().catch(() => null))
+    const json = await readLimitedJson(request)
+    if (!json.ok) return json.response
+    const parsed = parseNewContact(json.value)
     if (!parsed.ok) {
       return NextResponse.json({ error: parsed.error }, { status: 400 })
     }

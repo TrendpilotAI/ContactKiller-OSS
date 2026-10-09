@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation'
 import { NextResponse } from 'next/server'
 import { AuthenticationError, NotAllowedError, RecordId } from 'surrealdb'
 import { SESSION_MAX_AGE_SECONDS } from './auth'
-import { connectWithToken, type Db } from './client'
+import { connect, type Db } from './client'
 import { getSurrealConfig } from './config'
 
 export const SESSION_COOKIE = 'ck_session'
@@ -39,7 +39,7 @@ export async function openSession(): Promise<UserSession | null> {
 
   let db: Db
   try {
-    db = await connectWithToken(getSurrealConfig(), token)
+    db = await connect(getSurrealConfig(), { kind: 'token', token })
   } catch (error) {
     if (isAuthRejection(error)) return null
     throw error

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { MAX_BULK_IDS, bulkSetFinancialAdvisor } from '@/lib/db/contacts'
 import { isRecordKey } from '@/lib/db/client'
 import { withSession } from '@/lib/db/session'
-import { guardRequest } from '@/lib/request-guard'
+import { guardRequest, readLimitedJson } from '@/lib/request-guard'
 
 // POST /api/contacts/bulk-tag - Tag multiple contacts
 export async function POST(request: NextRequest) {
@@ -10,7 +10,9 @@ export async function POST(request: NextRequest) {
   if (blocked) return blocked
 
   return withSession(async ({ db }) => {
-    const body = await request.json().catch(() => null)
+    const json = await readLimitedJson(request)
+    if (!json.ok) return json.response
+    const body = json.value as { ids?: unknown; is_financial_advisor?: unknown } | null
     const ids: unknown = body?.ids
     const isFinancialAdvisor: unknown = body?.is_financial_advisor
 

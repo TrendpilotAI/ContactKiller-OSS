@@ -1,4 +1,4 @@
-import { listUnresolvedConflicts } from '@/lib/db/conflicts'
+import { RESOLVABLE_FIELDS, listUnresolvedConflicts } from '@/lib/db/conflicts'
 import { requireSession } from '@/lib/db/session'
 import type { ConflictDto } from '@/lib/db/types'
 import Link from 'next/link'
@@ -62,6 +62,10 @@ function ConflictCard({ conflict }: { conflict: ConflictDto }) {
     ? `${conflict.contact.first_name || ''} ${conflict.contact.last_name || ''}`.trim() || 'Unknown'
     : 'Unknown Contact'
 
+  // Only plain contact columns can be applied automatically; anything else
+  // (for example a shared email address) is reviewed by hand and dismissed.
+  const canApply = (RESOLVABLE_FIELDS as readonly string[]).includes(conflict.field)
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
       <div className="flex justify-between items-start mb-4">
@@ -96,31 +100,35 @@ function ConflictCard({ conflict }: { conflict: ConflictDto }) {
       </div>
 
       <div className="flex gap-2">
-        <form action={`/api/conflicts/${conflict.id}/resolve`} method="POST">
-          <input type="hidden" name="choice" value="a" />
-          <button
-            type="submit"
-            className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-200 transition"
-          >
-            Keep {conflict.source_a || 'Source A'}
-          </button>
-        </form>
-        <form action={`/api/conflicts/${conflict.id}/resolve`} method="POST">
-          <input type="hidden" name="choice" value="b" />
-          <button
-            type="submit"
-            className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-200 transition"
-          >
-            Keep {conflict.source_b || 'Source B'}
-          </button>
-        </form>
+        {canApply && (
+          <>
+            <form action={`/api/conflicts/${conflict.id}/resolve`} method="POST">
+              <input type="hidden" name="choice" value="a" />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-200 transition"
+              >
+                Keep {conflict.source_a || 'Source A'}
+              </button>
+            </form>
+            <form action={`/api/conflicts/${conflict.id}/resolve`} method="POST">
+              <input type="hidden" name="choice" value="b" />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-200 transition"
+              >
+                Keep {conflict.source_b || 'Source B'}
+              </button>
+            </form>
+          </>
+        )}
         <form action={`/api/conflicts/${conflict.id}/resolve`} method="POST">
           <input type="hidden" name="choice" value="skip" />
           <button
             type="submit"
             className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition"
           >
-            Skip
+            {canApply ? 'Skip' : 'Dismiss'}
           </button>
         </form>
       </div>

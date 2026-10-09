@@ -8,9 +8,12 @@ export const dynamic = 'force-dynamic'
 export default async function ContactsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; search?: string }>
+  searchParams: Promise<{ filter?: string | string[]; search?: string | string[] }>
 }) {
-  const { filter, search } = await searchParams
+  const params = await searchParams
+  // A repeated parameter arrives as an array; only a single string is honored.
+  const filter = typeof params.filter === 'string' ? params.filter : undefined
+  const search = typeof params.search === 'string' ? params.search : undefined
   const session = await requireSession('/contacts')
 
   let contacts: Awaited<ReturnType<typeof listContacts>> = []

@@ -1,5 +1,5 @@
 import { DateTime, RecordId, Surreal } from 'surrealdb'
-import type { SurrealAdminConfig, SurrealConfig } from './config'
+import type { SurrealConfig } from './config'
 
 export type Db = Surreal
 
@@ -7,47 +7,45 @@ const KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 export const ACCESS_METHOD = 'account'
 
-// Opens a connection that is authenticated as one record user. SurrealDB then
-// applies the table permissions in the schema (`owner = $auth`) to every query.
-export async function connectWithToken(config: SurrealConfig, token: string): Promise<Db> {
-  const db = new Surreal()
-  try {
-    await db.connect(config.url, {
-      namespace: config.namespace,
-      database: config.database,
-      authentication: token,
-      versionCheck: false,
-    })
-  } catch (error) {
-    await db.close().catch(() => undefined)
-    throw error
-  }
-  return db
-}
+export type Credentials =
+  // A record user's session token: SurrealDB then applies the schema's table
+  // permissions (`owner = $auth`) to every query on the connection.
+  | { kind: 'token'; token: string }
+  // No identity; only usable for the access method's signup and signin.
+  | { kind: 'anonymous' }
+  // Root scope, for provisioning (migrations, tests). Connects before the
+  // namespace and database exist, so neither is selected.
+  | { kind: 'root'; user: string; password: string }
 
-export async function connectAnonymous(config: SurrealConfig): Promise<Db> {
+export async function connect(config: SurrealConfig, credentials: Credentials): Promise<Db> {
   const db = new Surreal()
   try {
-    await db.connect(config.url, {
-      namespace: config.namespace,
-      database: config.database,
-      versionCheck: false,
-    })
-  } catch (error) {
-    await db.close().catch(() => undefined)
-    throw error
-  }
-  return db
-}
-
-// Provisioning only: migrations and tests. Connects at root scope so the
-// namespace and database can be created before they are selected.
-export async function connectAdmin(config: SurrealAdminConfig): Promise<Db> {
-  const db = new Surreal()
-  try {
-    await db.connect(config.url, {
-      authentication: { username: config.user, password: config.password },
-    })
+    switch (credentials.kind) {
+      case 'token':
+        await db.connect(config.url, {
+          namespace: config.namespace,
+          database: config.database,
+          authentication: credentials.token,
+          versionCheck: false,
+        })
+        break
+      case 'anonymous':
+        await db.connect(config.url, {
+          namespace: config.namespace,
+          database: config.database,
+          versionCheck: false,
+        })
+        break
+      case 'root':
+        await db.connect(config.url, {
+          authentication: { username: credentials.user, password: credentials.password },
+        })
+        break
+      default: {
+        const unreachable: never = credentials
+        throw new Error(`Unsupported credentials: ${String(unreachable)}`)
+      }
+    }
   } catch (error) {
     await db.close().catch(() => undefined)
     throw error
@@ -60,6 +58,41 @@ export async function withDb<T>(db: Db, run: (db: Db) => Promise<T>): Promise<T>
     return await run(db)
   } finally {
     await db.close().catch(() => undefined)
+  }
+}
+
+const RETRYABLE_CONFLICT = /Transaction conflict|can be retried/i
+const MAX_TRANSACTION_ATTEMPTS = 6
+
+// Runs a multi-statement transaction and throws the error that actually caused
+// it to fail. When a statement inside BEGIN/COMMIT fails, SurrealDB reports
+// every other statement as "not executed due to a failed transaction", and
+// `collect()` would surface one of those instead of the real cause. Returns the
+// per-statement results for the caller to pick from.
+//
+// Optimistic write conflicts between concurrent transactions roll the whole
+// transaction back, so they are retried (with jitter) a bounded number of times.
+export async function runTransaction(
+  db: Db,
+  sql: string,
+  vars?: Record<string, unknown>
+): Promise<unknown[]> {
+  for (let attempt = 1; ; attempt += 1) {
+    const responses = await db.query(sql, vars).responses()
+    const failures = responses.filter((response) => !response.success)
+    if (failures.length === 0) {
+      return responses.map((response) => (response.success ? response.result : undefined))
+    }
+
+    const secondary = /not executed due to a failed transaction|transaction was cancelled/i
+    const cause =
+      failures.find((failure) => !failure.success && !secondary.test(failure.error.message)) ?? failures[0]
+    const error = (cause as { error: Error }).error
+    if (RETRYABLE_CONFLICT.test(error.message) && attempt < MAX_TRANSACTION_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 25 * attempt))
+      continue
+    }
+    throw error
   }
 }
 

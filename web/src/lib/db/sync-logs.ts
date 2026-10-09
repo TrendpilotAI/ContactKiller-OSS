@@ -26,13 +26,12 @@ export async function startSyncLog(
 export async function finishSyncLog(db: Db, key: string, completion: SyncLogCompletion): Promise<void> {
   await db
     .query(
-      `UPDATE sync_log SET
+      `UPDATE $id SET
          status = $status,
          contacts_processed = $processed,
          conflicts_found = $conflicts,
          error_message = $error,
-         completed_at = $completedAt
-       WHERE id = $id`,
+         completed_at = $completedAt`,
       {
         id: recordId('sync_log', key),
         status: completion.status,

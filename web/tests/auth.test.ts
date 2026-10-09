@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { RecordId } from 'surrealdb'
-import { AuthError, MAX_PASSWORD_LENGTH, signIn, signUp } from '@/lib/db/auth'
-import { connectAnonymous, connectWithToken } from '@/lib/db/client'
+import { AuthError, MAX_PASSWORD_LENGTH, describeError, signIn, signUp } from '@/lib/db/auth'
+import { connect } from '@/lib/db/client'
 import { isSignupEnabledInDatabase, setSignupEnabled } from '@/lib/db/settings'
 import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
 
@@ -29,7 +29,7 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
 
   test('sign-up returns a session token that resolves to an app_user', async () => {
     const token = await signUp(database.config, 'Maya@Example.com', PASSWORD)
-    const db = await connectWithToken(database.config, token)
+    const db = await connect(database.config, { kind: 'token', token })
     try {
       const [auth] = await db.query('RETURN $auth').collect<[RecordId]>()
       expect(auth.table.name).toBe('app_user')
@@ -61,8 +61,35 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
     expect(await codeOf(signUp(database.config, 'MAYA@example.com', PASSWORD))).toBe('email_taken')
   })
 
+  test('only a duplicate address is reported as email_taken; other failures are not', async () => {
+    await expect(signUp({ ...database.config, url: 'http://127.0.0.1:9' }, 'nobody@example.com', PASSWORD)).rejects.not.toBeInstanceOf(AuthError)
+
+    // Two sign-ups racing for one new address: exactly one account is created,
+    // and the loser is either told the address is taken or gets a generic
+    // (retryable) failure, never a different account's data.
+    const settled = await Promise.allSettled([
+      signUp(database.config, 'racer@example.com', PASSWORD),
+      signUp(database.config, 'racer@example.com', PASSWORD),
+    ])
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const loser = settled.find((result) => result.status === 'rejected') as PromiseRejectedResult
+    if (loser.reason instanceof AuthError) expect(loser.reason.code).toBe('email_taken')
+    const [rows] = await database.admin
+      .query("SELECT * FROM app_user WHERE email = 'racer@example.com'")
+      .collect<[unknown[]]>()
+    expect(rows).toHaveLength(1)
+  })
+
+  test('failure logs never contain the password', () => {
+    const error = new Error(`signup failed for variables {"password":"${PASSWORD}"} at host`)
+    const described = describeError(error, [PASSWORD, undefined, ''])
+    expect(described).not.toContain(PASSWORD)
+    expect(described).toContain('[redacted]')
+    expect(describeError('plain string failure')).toContain('plain string failure')
+  })
+
   test('the database itself enforces the password and email policy', async () => {
-    const db = await connectAnonymous(database.config)
+    const db = await connect(database.config, { kind: 'anonymous' })
     try {
       await expect(
         db.signup({
@@ -87,7 +114,7 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
 
   test('record users cannot read accounts or password hashes', async () => {
     const token = await signIn(database.config, 'maya@example.com', PASSWORD)
-    const db = await connectWithToken(database.config, token)
+    const db = await connect(database.config, { kind: 'token', token })
     try {
       const [rows] = await db.query('SELECT * FROM app_user').collect<[unknown[]]>()
       expect(rows).toEqual([])
@@ -97,15 +124,15 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
   })
 
   test('garbage and tampered tokens are rejected', async () => {
-    await expect(connectWithToken(database.config, 'garbage')).rejects.toThrow()
+    await expect(connect(database.config, { kind: 'token', token: 'garbage' })).rejects.toThrow()
     const token = await signIn(database.config, 'maya@example.com', PASSWORD)
     const [header, payload, signature] = token.split('.')
     const forged = [header, payload, `${signature.slice(0, -3)}AAA`].join('.')
-    await expect(connectWithToken(database.config, forged)).rejects.toThrow()
+    await expect(connect(database.config, { kind: 'token', token: forged })).rejects.toThrow()
   })
 
   test('an anonymous connection cannot query at all', async () => {
-    const db = await connectAnonymous(database.config)
+    const db = await connect(database.config, { kind: 'anonymous' })
     try {
       for (const table of ['contact', 'email', 'oauth_token', 'conflict', 'app_user']) {
         await expect(db.query(`SELECT * FROM ${table}`).collect()).rejects.toThrow('Anonymous access not allowed')
@@ -117,7 +144,7 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
 
   describe('database-side sign-up gate', () => {
     const directSignup = async (email: string) => {
-      const db = await connectAnonymous(database.config)
+      const db = await connect(database.config, { kind: 'anonymous' })
       try {
         return await db.signup({
           namespace: database.config.namespace,
@@ -161,7 +188,7 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
 
     test('record users cannot read or change the setting', async () => {
       const token = await signIn(database.config, 'maya@example.com', PASSWORD)
-      const db = await connectWithToken(database.config, token)
+      const db = await connect(database.config, { kind: 'token', token })
       try {
         const [rows] = await db.query('SELECT * FROM setting').collect<[unknown[]]>()
         expect(rows).toEqual([])
@@ -178,7 +205,7 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
       const long = 'x'.repeat(MAX_PASSWORD_LENGTH + 1)
       expect(await codeOf(signIn(database.config, 'maya@example.com', long))).toBe('invalid_credentials')
 
-      const db = await connectAnonymous(database.config)
+      const db = await connect(database.config, { kind: 'anonymous' })
       try {
         await expect(
           db.signin({

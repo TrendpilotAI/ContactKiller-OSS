@@ -1,5 +1,5 @@
 import type { RecordId } from 'surrealdb'
-import { recordId, toPlain, type Db } from './client'
+import { recordId, runTransaction, toPlain, type Db } from './client'
 import type { ConflictDto } from './types'
 
 export type ConflictChoice = 'a' | 'b' | 'skip'
@@ -68,7 +68,7 @@ export async function listUnresolvedConflicts(db: Db): Promise<ConflictDto[]> {
       `SELECT id, contact AS contact_id, field, value_a, value_b, source_a, source_b,
               resolved, resolved_value, created_at, resolved_at,
               contact.{ first_name, last_name } AS contact
-         FROM conflict WHERE resolved = false ORDER BY created_at DESC`
+         FROM conflict WHERE owner = $auth AND resolved = false ORDER BY created_at DESC`
     )
     .collect<[unknown[]]>()
   return toPlain<ConflictDto[]>(rows)
@@ -81,7 +81,7 @@ export async function resolveConflict(
 ): Promise<ResolveOutcome> {
   const id = recordId('conflict', key)
   const [rows] = await db
-    .query('SELECT contact, field, value_a, value_b, resolved FROM conflict WHERE id = $id', { id })
+    .query('SELECT contact, field, value_a, value_b, resolved FROM $id', { id })
     .collect<[{ contact: RecordId; field: string; value_a: string | null; value_b: string | null; resolved: boolean }[]]>()
   const conflict = rows[0]
   if (!conflict) return { status: 'not_found' }
@@ -89,7 +89,7 @@ export async function resolveConflict(
 
   if (choice === 'skip') {
     await db
-      .query('UPDATE conflict SET resolved = true, resolved_at = time::now() WHERE id = $id', { id })
+      .query('UPDATE $id SET resolved = true, resolved_at = time::now()', { id })
       .collect()
     return { status: 'resolved' }
   }
@@ -101,14 +101,13 @@ export async function resolveConflict(
   const value = choice === 'a' ? conflict.value_a : conflict.value_b
   // `conflict.field` is checked against RESOLVABLE_FIELDS above, so it is safe
   // to use as an identifier here.
-  await db
-    .query(
-      `BEGIN;
-       UPDATE contact SET ${conflict.field} = $value WHERE id = $contact;
-       UPDATE conflict SET resolved = true, resolved_value = $value, resolved_at = time::now() WHERE id = $id;
-       COMMIT;`,
-      { id, contact: conflict.contact, value }
-    )
-    .collect()
+  await runTransaction(
+    db,
+    `BEGIN;
+     UPDATE $contact SET ${conflict.field} = $value;
+     UPDATE $id SET resolved = true, resolved_value = $value, resolved_at = time::now();
+     COMMIT;`,
+    { id, contact: conflict.contact, value }
+  )
   return { status: 'resolved' }
 }
