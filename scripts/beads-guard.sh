@@ -79,6 +79,28 @@ FORBIDDEN_CONFIG_KEY='^(export\.exclude_owner|directory\.label|dolt\.auto[-_]pus
 
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# A JSON array of the words in a space-separated list.
+words_json() { printf '%s\n' $1 | jq -R . | jq -sc .; }
+
+# check_table_names <json array of names> <space-separated allowed list> <what>
+# Names come from Dolt as JSON strings and are never word-split or substring
+# matched: each must be a plain identifier (this rejects spaces, newlines and
+# anything else odd) and then an exact member of the allowed list.
+check_table_names() {
+  local names="$1" allowed bad
+  allowed="$(words_json "$2")"
+  bad="$(printf '%s' "$names" | jq -r '.[] | select(test("\\A[a-z_]+\\z") | not) | @json')"
+  if [ -n "$bad" ]; then
+    echo "$3: table name(s) that are not plain identifiers ([a-z_]+): $(printf '%s' "$bad" | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  bad="$(printf '%s' "$names" | jq -r --argjson allowed "$allowed" '.[] | select(IN($allowed[]) | not) | @json')"
+  if [ -n "$bad" ]; then
+    echo "$3: table(s) not on the known list: $(printf '%s' "$bad" | tr '\n' ' ')" >&2
+    exit 1
+  fi
+}
+
 # Is this config value one of the spellings that mean "off"?
 is_off() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -248,19 +270,15 @@ case "$cmd" in
     mkdir -p "$dir/synced-tables"
 
     # Every table must be one we know; an unknown one could carry data nothing scans.
-    while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      if ! in_list "$name" "$PUBLISHED_TABLES $IGNORED_TABLES $VIEWS"; then
-        echo "the Dolt store has a table that is not on the known list: $name" >&2
-        exit 1
-      fi
-    done < <(dq_csv "SHOW TABLES" | tr -d '"')
+    names="$(dq "SHOW TABLES" | jq -c '[(.rows // [])[] | to_entries[0].value]')"
+    check_table_names "$names" "$PUBLISHED_TABLES $IGNORED_TABLES $VIEWS" "the Dolt store"
 
-    # The dolt_ignore patterns decide which tables are never pushed; they must not change.
-    ignore_patterns="$(dq_csv "SELECT pattern FROM dolt_ignore WHERE ignored = 1" | sort | tr '\n' ' ')"
-    expected_patterns="$(printf '%s\n' $EXPECTED_DOLT_IGNORE | sort | tr '\n' ' ')"
-    if [ "$ignore_patterns" != "$expected_patterns" ]; then
-      echo "dolt_ignore patterns changed (expected: $expected_patterns; found: $ignore_patterns)" >&2
+    # The dolt_ignore rows (pattern and flag, all of them) decide which tables are
+    # never pushed; an added row, including an un-ignore override, must fail.
+    expected_ignore="$(words_json "$EXPECTED_DOLT_IGNORE" | jq -c 'map({pattern: ., ignored: 1}) | sort_by(.pattern)')"
+    actual_ignore="$(dq "SELECT pattern, ignored FROM dolt_ignore" | jq -c '[(.rows // [])[] | {pattern, ignored: (.ignored | tonumber)}] | sort_by(.pattern)')"
+    if [ "$actual_ignore" != "$expected_ignore" ]; then
+      echo "dolt_ignore rows changed (expected: $expected_ignore; found: $actual_ignore)" >&2
       exit 1
     fi
 
@@ -283,6 +301,8 @@ case "$cmd" in
       printf '  %s\n' $unexpected >&2
       exit 1
     fi
+    # View (and trigger) definitions are SQL that gets published too.
+    dq "SELECT * FROM dolt_schemas" > "$dir/synced-tables/dolt_schemas.json"
     # bd's own view of the config, scanned as well (its keys are policed by the config guard).
     bd config list --json > "$dir/synced-tables/config-list.json"
     ;;
@@ -313,27 +333,23 @@ case "$cmd" in
 
     # Every table touched by those commits must be a published table (this also names
     # tables that were created and dropped inside the range).
-    touched="$(dq_csv "SELECT DISTINCT table_name FROM dolt_diff WHERE commit_hash IN $in_range" | tr -d '"')"
-    for table in $touched; do
-      if ! in_list "$table" "$PUBLISHED_TABLES $DOLT_SYSTEM_TABLES"; then
-        echo "Dolt history after $base touched a table outside the published set: $table" >&2
-        exit 1
-      fi
-    done
-    # Row-level changes (added, modified and removed rows) of each touched table.
-    for table in $touched; do
-      if in_list "$table" "$DOLT_SYSTEM_TABLES"; then
-        # Dolt's own versioned metadata (ignore patterns, view definitions): best effort.
-        dq "SELECT * FROM \`dolt_diff_$table\` WHERE to_commit IN $in_range" > "$out/diff_$table.json" 2>/dev/null \
-          || echo '{"rows":[]}' > "$out/diff_$table.json"
-      else
-        dq "SELECT * FROM \`dolt_diff_$table\` WHERE to_commit IN $in_range" > "$out/diff_$table.json" \
-          || { echo "could not read the history of table $table (dropped or changed in range?)" >&2; exit 1; }
-      fi
+    touched="$(dq "SELECT DISTINCT table_name FROM dolt_diff WHERE commit_hash IN $in_range" \
+      | jq -c '[(.rows // [])[] | .table_name]')"
+    check_table_names "$touched" "$PUBLISHED_TABLES $DOLT_SYSTEM_TABLES" "Dolt history after $base"
+    # Row-level changes (added, modified and removed rows) of each touched table. The
+    # names are now known to be plain identifiers, so listing them is safe. A query
+    # that errors fails the run: there is no empty fallback.
+    for table in $(printf '%s' "$touched" | jq -r '.[]'); do
+      dq "SELECT * FROM \`dolt_diff_$table\` WHERE to_commit IN $in_range" > "$out/diff_$table.json" \
+        || { echo "could not read the history of table $table; refusing to continue" >&2; exit 1; }
     done
     dq "SELECT * FROM dolt_history_config WHERE commit_hash IN $in_range" > "$out/history_config.json"
-    if [ "$base" != ROOT ]; then
-      (cd "$store" && dolt diff "$base" HEAD) > "$out/net.diff" 2>&1 || true
+    if [ "$base" = ROOT ]; then
+      echo "no base commit: the whole history is dumped in the diff_*.json files" > "$out/net.diff"
+    else
+      (cd "$store" && dolt diff "$base" HEAD) > "$out/net.diff" \
+        || { echo "dolt diff $base HEAD failed; refusing to continue" >&2; exit 1; }
+      [ -s "$out/net.diff" ] || echo "no changes after $base" > "$out/net.diff"
     fi
 
     # A forbidden config key counts even if a later commit removed it again.

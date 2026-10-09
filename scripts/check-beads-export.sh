@@ -35,9 +35,12 @@
 # metadata, child_counters, issue_counter and schema_migrations tables; the audit
 # log; and every change made by the Dolt commits after the trusted baseline in
 # scripts/beads-history-baseline.txt (row-level diffs of every published table,
-# config history and commit messages), so a forbidden key set and later unset, or
-# a private value added and later removed, is refused even though the final state
-# is clean.
+# config history, commit messages, the net `dolt diff` and the current view
+# definitions in dolt_schemas), so a forbidden key set and later unset, or a
+# private value added and later removed, is refused even though the final state
+# is clean. The baseline file is listed in .github/CODEOWNERS; whether changing it
+# needs the owner's approval depends on branch protection the repository owner
+# controls (not enforced by anything in this repository).
 #
 # Not covered: Dolt history at or before the baseline commit (it was reviewed by
 # hand, not scanned here), the tables that dolt_ignore keeps out of commits (they
@@ -156,7 +159,7 @@ if [ ! -s "$export_file" ]; then
 else
   bun scripts/check-public-release.ts --scan-export "$export_file" "$scan_dir/interactions.jsonl"
 fi
-bun scripts/check-public-release.ts --scan-export "$scan_dir"/synced-tables/*.json "$scan_dir"/history/*.json
+bun scripts/check-public-release.ts --scan-export "$scan_dir"/synced-tables/*.json "$scan_dir"/history/*.json "$scan_dir"/history/net.diff
 scripts/beads-guard.sh no-allow "$scan_dir"
 scripts/beads-guard.sh gitleaks "$scan_dir"
 

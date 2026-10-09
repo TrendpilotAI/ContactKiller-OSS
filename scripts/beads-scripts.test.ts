@@ -208,7 +208,7 @@ echo "STUB $(basename "$0") $*" >> "$CALLS"
 if [ "$(basename "$0")" = beads-guard.sh ]; then
   case "$1" in
     remote-base) echo "\${REMOTE_BASE:-ROOT}" ;;
-    history) mkdir -p "$3/history" && echo '{"rows":[]}' > "$3/history/commits.json" ;;
+    history) mkdir -p "$3/history" && echo '{"rows":[]}' > "$3/history/commits.json" && echo "no changes" > "$3/history/net.diff" ;;
   esac
 fi
 exit 0

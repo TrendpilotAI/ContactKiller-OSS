@@ -2,7 +2,7 @@
 // no Dolt remote at all (or, for the push-related tests, only a local file remote),
 // and every helper refuses to continue if a real network remote shows up.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export const hasTool = (tool: string): boolean => spawnSync("sh", ["-c", `command -v ${tool}`]).status === 0;
@@ -23,32 +23,52 @@ export function isolatedEnv(home: string): NodeJS.ProcessEnv {
   return env;
 }
 
-const NETWORK_REMOTE = /(https?:\/\/|ssh:\/\/|git@|git\+https|git\+ssh|github\.com)/i;
+const ALLOWED_REMOTE = /^(file:\/\/|git\+file:\/\/)/i;
 
-/**
- * Throws if the workspace has any git remote or Dolt remote that is not a local
- * file remote. Called before anything that could possibly push.
- */
-export function assertNoRealRemote(ws: string, env: NodeJS.ProcessEnv): void {
-  const outputs: string[] = [];
-  const git = spawnSync("git", ["remote", "-v"], { cwd: ws, env, encoding: "utf8" });
-  outputs.push(git.stdout ?? "");
-  const bd = spawnSync("bd", ["dolt", "remote", "list"], { cwd: ws, env, encoding: "utf8" });
-  outputs.push(bd.stdout ?? "");
-  const stores = join(ws, ".beads/embeddeddolt");
-  if (existsSync(stores) && hasTool("dolt")) {
-    for (const name of spawnSync("ls", [stores], { encoding: "utf8" }).stdout.split("\n").filter(Boolean)) {
-      const sql = spawnSync("dolt", ["sql", "-r", "csv", "-q", "SELECT url FROM dolt_remotes"], {
-        cwd: join(stores, name),
-        env,
-        encoding: "utf8",
-      });
-      outputs.push(sql.stdout ?? "");
+function runOrThrow(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): string {
+  const result = spawnSync(cmd, args, { cwd, env, encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw new Error(`refusing to run: cannot check remotes because \`${cmd} ${args.join(" ")}\` failed in ${cwd}: ${result.error?.message ?? result.stderr}`);
+  }
+  return result.stdout;
+}
+
+/** Every remote URL that git, bd and the Dolt store report for a workspace. */
+function remoteUrls(ws: string, env: NodeJS.ProcessEnv): string[] {
+  const urls: string[] = [];
+  // `git remote -v`: "<name>\t<url> (fetch|push)"
+  for (const line of runOrThrow("git", ["remote", "-v"], ws, env).split("\n").filter(Boolean)) {
+    urls.push(line.split(/\s+/)[1] ?? line);
+  }
+  if (existsSync(join(ws, ".beads"))) {
+    // `bd dolt remote list`: "<name> <url>" lines, or "No remotes configured."
+    for (const line of runOrThrow("bd", ["dolt", "remote", "list"], ws, env).split("\n").map((l) => l.trim()).filter(Boolean)) {
+      if (/^no remotes configured/i.test(line)) continue;
+      urls.push(line.split(/\s+/)[1] ?? line);
+    }
+    const stores = join(ws, ".beads/embeddeddolt");
+    // The Dolt CLI is the most direct view; bd's own remote list above covers the same remotes without it.
+    if (existsSync(stores) && hasTool("dolt")) {
+      for (const entry of readdirSync(stores, { withFileTypes: true }).filter((e) => e.isDirectory())) {
+        const name = entry.name;
+        const csv = runOrThrow("dolt", ["sql", "-r", "csv", "-q", "SELECT url FROM dolt_remotes"], join(stores, name), env);
+        for (const line of csv.split("\n").slice(1).filter(Boolean)) urls.push(line.replace(/^"|"$/g, ""));
+      }
     }
   }
-  const joined = outputs.join("\n");
-  if (NETWORK_REMOTE.test(joined)) {
-    throw new Error(`refusing to run: the test workspace ${ws} has a network remote configured:\n${joined}`);
+  return urls;
+}
+
+/**
+ * Throws unless every git, bd and Dolt remote of the workspace is a local file
+ * remote (file:// or git+file://). An allowlist: aws://, gs://, oci://, ssh and
+ * anything else unknown is refused, and so is any failure to ask. Called before
+ * anything that could possibly push.
+ */
+export function assertNoRealRemote(ws: string, env: NodeJS.ProcessEnv): void {
+  const refused = remoteUrls(ws, env).filter((url) => !ALLOWED_REMOTE.test(url));
+  if (refused.length > 0) {
+    throw new Error(`refusing to run: the test workspace ${ws} has a non-local remote configured: ${refused.join(", ")}`);
   }
 }
 

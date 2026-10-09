@@ -29,27 +29,60 @@ function g(workspace: Workspace, env: NodeJS.ProcessEnv, ...args: string[]) {
 const bd = (workspace: Workspace, ...args: string[]) =>
   spawnSync("bd", args, { cwd: workspace.ws, env: workspace.env, encoding: "utf8" });
 
-describe("test support", () => {
-  test("refuses a workspace that has a GitHub or other network remote", () => {
+describe("test support: assertNoRealRemote is an allowlist", () => {
+  function repoWithRemote(dir: string, url?: string): { ws: string; env: NodeJS.ProcessEnv } {
+    const env = isolatedEnv(dir);
+    const ws = join(dir, "ws");
+    mkdirSync(ws);
+    execFileSync("git", ["init", "-q"], { cwd: ws, env });
+    if (url) execFileSync("git", ["remote", "add", "origin", url], { cwd: ws, env });
+    return { ws, env };
+  }
+
+  test("a workspace with no remote passes", () => {
     withTempDir((dir) => {
-      const env = isolatedEnv(dir);
-      const ws = join(dir, "ws");
-      mkdirSync(ws);
-      execFileSync("git", ["init", "-q"], { cwd: ws, env });
+      const { ws, env } = repoWithRemote(dir);
       expect(() => assertNoRealRemote(ws, env)).not.toThrow();
-      execFileSync("git", ["remote", "add", "origin", "https://github.com/Example/Repo"], { cwd: ws, env });
-      expect(() => assertNoRealRemote(ws, env)).toThrow("network remote");
     });
   });
 
-  test("accepts a local file remote", () => {
+  test.each(["file:///tmp/somewhere.git", "git+file:///tmp/somewhere.git"])("the local file remote %s passes", (url) => {
     withTempDir((dir) => {
-      const env = isolatedEnv(dir);
-      const ws = join(dir, "ws");
-      mkdirSync(ws);
-      execFileSync("git", ["init", "-q"], { cwd: ws, env });
-      execFileSync("git", ["remote", "add", "origin", "file:///tmp/somewhere.git"], { cwd: ws, env });
+      const { ws, env } = repoWithRemote(dir, url);
       expect(() => assertNoRealRemote(ws, env)).not.toThrow();
+    });
+  });
+
+  test.each([
+    "https://github.com/Example/Repo",
+    "git+https://github.com/Example/Repo",
+    "ssh://git@example.com/repo.git",
+    "git@example.com:Example/Repo.git",
+    "aws://[bucket]/prefix",
+    "gs://bucket/prefix",
+    "oci://tenancy/bucket/prefix",
+    "/tmp/a-plain-local-path.git",
+    "something-unknown://host/repo",
+  ])("the remote %s is refused", (url) => {
+    withTempDir((dir) => {
+      const { ws, env } = repoWithRemote(dir, url);
+      expect(() => assertNoRealRemote(ws, env)).toThrow("non-local remote");
+    });
+  });
+
+  test("fails instead of passing when git cannot be run", () => {
+    withTempDir((dir) => {
+      const { ws, env } = repoWithRemote(dir);
+      expect(() => assertNoRealRemote(ws, { ...env, PATH: "/nonexistent" })).toThrow("cannot check remotes");
+    });
+  });
+
+  test.skipIf(!hasBd)("fails instead of passing when bd cannot be run in a bd workspace", () => {
+    withTempDir((dir) => {
+      const { ws, env } = repoWithRemote(dir);
+      mkdirSync(join(ws, ".beads"));
+      const gitDir = spawnSync("sh", ["-c", "dirname $(command -v git)"], { encoding: "utf8" }).stdout.trim();
+      expect(() => assertNoRealRemote(ws, { ...env, PATH: gitDir === "/usr/bin" ? "/usr/bin" : gitDir })).toThrow();
     });
   });
 });
@@ -424,7 +457,8 @@ describe.skipIf(!hasDolt)("beads-guard.sh synced-tables", () => {
       mkdirSync(out);
       const result = run(w, out);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("not on the known list: sneaky_notes");
+      expect(result.stderr).toContain("not on the known list");
+      expect(result.stderr).toContain("sneaky_notes");
     });
   });
 
@@ -436,7 +470,7 @@ describe.skipIf(!hasDolt)("beads-guard.sh synced-tables", () => {
       mkdirSync(out);
       const result = run(w, out);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("dolt_ignore patterns changed");
+      expect(result.stderr).toContain("dolt_ignore rows changed");
     });
   });
 
@@ -449,6 +483,49 @@ describe.skipIf(!hasDolt)("beads-guard.sh synced-tables", () => {
       const result = run(w, out);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("note_to_self");
+    });
+  });
+
+  test.each([
+    ["a name with a space (two allowlisted names)", "issues labels"],
+    ["a name with a space and one unknown word", "issues extra"],
+    ["a name with a newline", "issues\nlabels"],
+    ["an upper-case name", "Issues"],
+    ["a name with a digit", "issues2"],
+    ["a name with a hyphen", "issues-labels"],
+  ])("a table named %p is rejected, not substring-matched against the allowlist", (_name, tableName) => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 1);
+      // Dolt accepts these as quoted identifiers, which is how a hostile database could carry one.
+      sql(w, `CREATE TABLE \`${tableName}\` (id INT PRIMARY KEY, note TEXT)`);
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      const result = run(w, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("the Dolt store");
+      expect(result.stderr).toMatch(/not plain identifiers|not on the known list/);
+    });
+  });
+
+  test("an added un-ignore override row in dolt_ignore fails, not just a changed ignored=1 set", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 1);
+      sql(w, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('wisp_comments', 0)");
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      const result = run(w, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("dolt_ignore rows changed");
+    });
+  });
+
+  test("the current view definitions (dolt_schemas) are dumped for scanning", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 1);
+      const out = join(dir, "scan");
+      mkdirSync(out);
+      expect(run(w, out).status).toBe(0);
+      expect(readFileSync(join(out, "synced-tables/dolt_schemas.json"), "utf8")).toContain("CREATE");
     });
   });
 
@@ -562,6 +639,88 @@ describe.skipIf(!hasDolt)("beads-guard.sh history (commits after a trusted base)
       const result = history(w, base, out);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("sneaky_notes");
+    });
+  });
+
+  test.each([
+    ["a space (two allowlisted names)", "issues labels"],
+    ["a newline", "issues\nlabels"],
+  ])("a table with %s in its name, committed in the range, is refused by the history scan", (_name, tableName) => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 0);
+      const base = head(w);
+      sql(w, `CREATE TABLE \`${tableName}\` (id INT PRIMARY KEY, note TEXT)`);
+      sql(w, `INSERT INTO \`${tableName}\` VALUES (1, 'x')`);
+      commit(w, "add an oddly named table");
+      const out = join(dir, "out");
+      mkdirSync(out);
+      const result = history(w, base, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("not plain identifiers");
+    });
+  });
+
+  test("net.diff is always written, and its content reaches the scanner (a private id only the net diff shows)", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 0);
+      const base = head(w);
+      const empty = join(dir, "empty");
+      mkdirSync(empty);
+      expect(history(w, base, empty).status).toBe(0);
+      expect(readFileSync(join(empty, "history/net.diff"), "utf8")).toContain("no changes after");
+
+      expect(bd(w, "create", "--title", "t", "--description", `owner ${privateId}`, "--silent").status).toBe(0);
+      const out = join(dir, "out");
+      mkdirSync(out);
+      expect(history(w, base, out).status).toBe(0);
+      const diff = join(out, "history/net.diff");
+      expect(readFileSync(diff, "utf8")).toContain(privateId);
+      const scan = spawnSync("bun", [resolve(import.meta.dir, "check-public-release.ts"), "--scan-export", diff], { encoding: "utf8" });
+      expect(scan.status).toBe(1);
+    });
+  });
+
+  test("a failing dolt diff fails the run instead of being ignored", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 0);
+      const base = head(w);
+      // A dolt shim that fails only for `dolt diff`; everything else is the real binary.
+      const real = spawnSync("sh", ["-c", "command -v dolt"], { encoding: "utf8" }).stdout.trim();
+      mkdirSync(join(dir, "shim"));
+      writeFileSync(join(dir, "shim/dolt"), `#!/usr/bin/env bash\nif [ "$1" = diff ]; then echo "boom" >&2; exit 1; fi\nexec "${real}" "$@"\n`);
+      chmodSync(join(dir, "shim/dolt"), 0o755);
+      const out = join(dir, "out");
+      mkdirSync(out);
+      const result = g(w, { ...w.env, PATH: `${join(dir, "shim")}:${w.env.PATH}` }, "history", base, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("dolt diff");
+    });
+  });
+
+  test("a failing dolt_schemas history query fails the run instead of falling back to empty rows", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 0);
+      const base = head(w);
+      // Change a view definition so dolt_schemas appears in the range.
+      sql(w, "DROP VIEW ready_issues");
+      sql(w, "CREATE VIEW ready_issues AS SELECT * FROM issues");
+      commit(w, "change a view");
+      const real = spawnSync("sh", ["-c", "command -v dolt"], { encoding: "utf8" }).stdout.trim();
+      mkdirSync(join(dir, "shim"));
+      writeFileSync(
+        join(dir, "shim/dolt"),
+        `#!/usr/bin/env bash\ncase "$*" in *dolt_diff_dolt_schemas*) echo "boom" >&2; exit 1 ;; esac\nexec "${real}" "$@"\n`,
+      );
+      chmodSync(join(dir, "shim/dolt"), 0o755);
+      const out = join(dir, "out");
+      mkdirSync(out);
+      const result = g(w, { ...w.env, PATH: `${join(dir, "shim")}:${w.env.PATH}` }, "history", base, out);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("could not read the history of table dolt_schemas");
+
+      // Unshimmed, the changed view definition is dumped so its SQL gets scanned.
+      expect(history(w, base, out).status).toBe(0);
+      expect(readFileSync(join(out, "history/diff_dolt_schemas.json"), "utf8")).toContain("ready_issues");
     });
   });
 

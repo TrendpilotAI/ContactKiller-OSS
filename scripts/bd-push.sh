@@ -87,7 +87,7 @@ base="$(scripts/beads-guard.sh remote-base "$remote_name")"
 unpushed_dir="$(mktemp -d)"
 trap 'rm -rf "$unpushed_dir"' EXIT
 scripts/beads-guard.sh history "$base" "$unpushed_dir"
-unpushed_files=("$unpushed_dir"/history/*.json)
+unpushed_files=("$unpushed_dir"/history/*.json "$unpushed_dir"/history/net.diff)
 [ -e "${unpushed_files[0]}" ] || { echo "no history dump was produced; not pushing" >&2; exit 1; }
 bun scripts/check-public-release.ts --scan-export "${unpushed_files[@]}"
 scripts/beads-guard.sh no-allow "$unpushed_dir"
