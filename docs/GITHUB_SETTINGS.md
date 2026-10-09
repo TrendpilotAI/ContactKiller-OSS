@@ -10,7 +10,7 @@ Publish the allow-listed release snapshot as a new repository:
 - **Description:** Experimental open-source contact reconciliation with provenance, replayable models, and human-gated cleanup plans.
 - **Website:** `https://website-alpha-rose-81.vercel.app`
 - **License:** Apache-2.0
-- **Topics:** `contacts`, `identity-resolution`, `data-provenance`, `activegraph`, `surrealdb`, `falkordb`, `supabase`, `nextjs`, `open-source`
+- **Topics:** `contacts`, `identity-resolution`, `data-provenance`, `activegraph`, `surrealdb`, `falkordb`, `nextjs`, `open-source`
 
 ## Protection baseline
 

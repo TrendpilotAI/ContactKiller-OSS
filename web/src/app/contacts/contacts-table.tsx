@@ -1,10 +1,10 @@
 'use client'
 
 import { useState } from 'react'
-import type { ContactWithDetails } from '@/lib/database.types'
+import type { ContactDto } from '@/lib/db/types'
 
 interface ContactsTableProps {
-  contacts: ContactWithDetails[]
+  contacts: ContactDto[]
 }
 
 export function ContactsTable({ contacts }: ContactsTableProps) {
