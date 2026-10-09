@@ -124,6 +124,8 @@
     "web/surreal/migrations/0005_unique_conflicts.surql",
     "web/surreal/migrations/0006_signup_constant_work.down.surql",
     "web/surreal/migrations/0006_signup_constant_work.surql",
+    "web/surreal/migrations/0007_phone_match_keys.down.surql",
+    "web/surreal/migrations/0007_phone_match_keys.surql",
     "web/tailwind.config.ts",
     "web/tests/auth.test.ts",
     "web/tests/config.test.ts",

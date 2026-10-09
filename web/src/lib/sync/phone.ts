@@ -1,4 +1,4 @@
-import { parsePhoneNumber } from 'libphonenumber-js'
+import { parsePhoneNumber, type CountryCallingCode, type PhoneNumber } from 'libphonenumber-js'
 
 // The only characters a phone value may contain besides an extension marker.
 // Anything else (letters, "call me at", "ask for Pat") means the value is
@@ -25,17 +25,43 @@ export function normalizePhone(phone: string): string | null {
 }
 
 // A provider that already knows the country (Google's `canonicalForm`) is
-// better evidence than guessing "US" for a bare national number. Its E.164
-// replaces the parsed number; the extension still comes from the raw value,
-// since canonical forms do not carry one. Without a usable canonical form this
-// is exactly normalizePhone.
+// better evidence than guessing "US" for a bare national number, but only for
+// a value that is a phone to begin with. So the raw value is checked first,
+// exactly as normalizePhone checks it (a recognised extension marker at most,
+// and otherwise only digits and phone punctuation); anything normalizePhone
+// would refuse as text is refused here too, whatever the canonical form says.
+//
+// The canonical form then decides the region: the raw number, read in the
+// canonical form's country, must be that very number. If it is not, the two
+// disagree and there is no key. The extension comes from the raw value, since
+// canonical forms do not carry one. A canonical form that is missing or is not
+// a valid international number is ignored and the raw value is parsed as US.
 export function phoneKey(raw: string, canonicalForm?: string | null): string | null {
+  const { base, extension } = splitExtension(raw)
+  if (base === '' || !PHONE_CHARACTERS.test(base)) return null
+
   const canonical = canonicalForm?.trim()
   if (canonical && canonical.startsWith('+') && PHONE_CHARACTERS.test(canonical)) {
-    const e164 = toE164(canonical)
-    if (e164) return withExtension(e164, splitExtension(raw).extension)
+    const known = parseValid(canonical)
+    if (known) {
+      const asRead = parseValid(base, known.countryCallingCode)
+      return asRead && asRead.format('E.164') === known.format('E.164')
+        ? withExtension(known.format('E.164'), extension)
+        : null
+    }
   }
-  return normalizePhone(raw)
+  return withExtension(toE164(base), extension)
+}
+
+function parseValid(number: string, defaultCallingCode?: string): PhoneNumber | null {
+  try {
+    const parsed = defaultCallingCode
+      ? parsePhoneNumber(number, { defaultCallingCode: defaultCallingCode as CountryCallingCode })
+      : parsePhoneNumber(number, 'US')
+    return parsed.isValid() ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 function splitExtension(value: string): { base: string; extension: string | null } {

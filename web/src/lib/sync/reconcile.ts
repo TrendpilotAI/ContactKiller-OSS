@@ -13,7 +13,7 @@ import {
 } from '@/lib/db/contacts'
 import type { Platform } from '@/lib/db/types'
 import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
-import { normalizePhone, phoneKey } from './phone'
+import { phoneKey } from './phone'
 
 export interface ProviderContact {
   // The provider's identifier for this contact: Google's resourceName, or a
@@ -124,11 +124,11 @@ export async function reconcileProviderContacts(
   const localRawPhones = new Set<string>()
   for (const p of index.phones) {
     localRawPhones.add(p.phone.trim())
-    const normalized = normalizePhone(p.phone)
-    if (normalized) {
-      const set = localPhones.get(normalized) ?? new Set<string>()
+    // Stored keys only: what a number meant when it was saved is what it means.
+    if (p.key) {
+      const set = localPhones.get(p.key) ?? new Set<string>()
       set.add(p.contact)
-      localPhones.set(normalized, set)
+      localPhones.set(p.key, set)
     }
   }
   const emailOwners = owners(candidates, c => c.emailKeys)
@@ -293,7 +293,12 @@ export async function reconcileProviderContacts(
               is_financial_advisor: isLikelyFinancialAdvisor(candidate.emails.map(e => e.email)),
             },
             emails: candidate.emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
-            phones: candidate.phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
+            phones: candidate.phones.map((p, i) => ({
+              value: p.phone,
+              label: p.label,
+              is_primary: i === 0,
+              key: phoneKey(p.phone, p.canonicalForm),
+            })),
             links: candidate.stableId ? [{ platform, platform_id: candidate.providerId }] : [],
           })
           result.conflicts += await fileConflictsOnce(db, userId, created, sharedEmailConflicts(candidate))

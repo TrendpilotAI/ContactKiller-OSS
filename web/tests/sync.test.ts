@@ -330,6 +330,47 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         expect(phoneKey('Call me at 212-555-0100')).toBeNull()
       })
 
+      test('a canonical form never rescues a value normalizePhone would refuse as text', () => {
+        const canonical = '+12125550100'
+        for (const raw of [
+          '212-555-0100,,123',
+          '212-555-0100#123',
+          '212-555-0100;5',
+          '212-555-0100 extn 5',
+          '212-555-0100 ext=5',
+          '212-555-0100 ext. five',
+          'Call Pat at 212-555-0100',
+          '212-555-0100 (home)',
+          'tel:+12125550100',
+          '',
+        ]) {
+          expect(normalizePhone(raw)).toBeNull()
+          expect(phoneKey(raw, canonical)).toBeNull()
+        }
+        // The recognised spellings still work, with the canonical form.
+        expect(phoneKey('212-555-0100 x123', canonical)).toBe(`${canonical};ext=123`)
+        expect(phoneKey('212-555-0100;ext=123', canonical)).toBe(`${canonical};ext=123`)
+        expect(phoneKey('212-555-0100 ext. 123', canonical)).toBe(`${canonical};ext=123`)
+      })
+
+      test('the raw number, read in the canonical form\'s country, must be that very number', () => {
+        const national = ['551', '234', '5678'].join('')
+        const bare = ['551', '234', '5678'].join(' ')
+        const mexico = ['+52', national].join('')
+        const us = ['+1', national].join('')
+        expect(phoneKey('55 1234 5678', mexico)).toBe(mexico)
+        expect(phoneKey(['+52', '55 1234 5678'].join(' '), mexico)).toBe(mexico)
+        expect(phoneKey(bare, us)).toBe(us)
+        // A different number than the canonical form describes.
+        expect(phoneKey('55 1234 5679', mexico)).toBeNull()
+        expect(phoneKey('212-555-0100', '+12125550101')).toBeNull()
+        // The raw value names another country than the canonical form.
+        expect(phoneKey(['+1', bare].join(' '), mexico)).toBeNull()
+        expect(phoneKey(['+52', '55 1234 5678'].join(' '), us)).toBeNull()
+        // Digits that only agree after discarding leading digits are not "equal".
+        expect(phoneKey(['99', '55 1234 5678'].join(''), mexico)).toBeNull()
+      })
+
       test('a bare Mexican national number with an MX canonical form does not match a US contact', async () => {
         const user = await fresh('mexico')
         try {
@@ -345,13 +386,11 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           expect(mexican).toMatchObject({ imported: 1, updated: 0, skipped: [] })
           expect((await getContact(user.db, us))!.platform_links).toEqual([])
 
-          // The Mexican contact keeps the raw text it came with, and the local
-          // index reads bare numbers as US, so a US-canonical person now reaches
-          // two contacts. That is ambiguous: skipped, nothing merged.
+          // The Mexican contact stored its own key, so a US-canonical person
+          // with the same digits reaches only the US contact.
           const american = await reconcileGoogleContacts(user.db, user.id, [person('people/us', ['+1', bare].join(''))])
-          expect(american).toMatchObject({ imported: 0, updated: 0 })
-          expect(american.skipped).toEqual([expect.stringContaining('more than one existing contact')])
-          expect((await getContact(user.db, us))!.platform_links).toEqual([])
+          expect(american).toMatchObject({ imported: 0, updated: 1, skipped: [] })
+          expect((await getContact(user.db, us))!.platform_links.map((l) => l.platform_id)).toEqual(['people/us'])
 
           // Re-running the Mexican one still finds its own contact by id.
           const again = await reconcileGoogleContacts(user.db, user.id, [person('people/mx', ['+52', bare].join(''))])
@@ -1321,6 +1360,140 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
 
     test('rejects a file with no cards', async () => {
       await expect(importVcf(alice.db, alice.id, '')).rejects.toBeInstanceOf(EmptyVcfError)
+    })
+  })
+
+  describe('stored phone keys', () => {
+    const usNumber = () => ['551', '234', '5678'].join('-')
+    const mexRaw = '55 1234 5678'
+    const national = ['551', '234', '5678'].join('')
+    const mexCanonical = () => ['+52', national].join('')
+    const keysOf = async (user: TestUser) => {
+      const [rows] = await user.db
+        .query('SELECT phone, phone_key FROM phone ORDER BY phone')
+        .collect<[{ phone: string; phone_key?: string | null }[]]>()
+      return Object.fromEntries(rows.map((row) => [row.phone, row.phone_key]))
+    }
+
+    test('the key chosen at import time is stored next to the raw text', async () => {
+      const user = await createTestUser(database, 'storedkeys')
+      try {
+        await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/k1', names: [{ displayName: 'Mexico' }], phoneNumbers: [{ value: mexRaw, canonicalForm: mexCanonical() }] },
+          { resourceName: 'people/k2', names: [{ displayName: 'US Ext' }], phoneNumbers: [{ value: '(212) 555-0100 x5' }] },
+          { resourceName: 'people/k3', names: [{ displayName: 'Prose' }], phoneNumbers: [{ value: 'Call Pat at 212-555-0100' }] },
+        ])
+        await importVcf(user.db, user.id, vcard(`FN:Card\r\nTEL:${usNumber()}`))
+        await seedLocal(user, { display_name: 'Manual' }, { phones: ['(202) 555-0143'] })
+
+        expect(await keysOf(user)).toEqual({
+          [mexRaw]: mexCanonical(),
+          '(212) 555-0100 x5': '+12125550100;ext=5',
+          'Call Pat at 212-555-0100': null,
+          [usNumber()]: ['+1', national].join(''),
+          '(202) 555-0143': '+12025550143',
+        })
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('Google MX number then an iCloud US card with the same digits: different people', async () => {
+      const user = await createTestUser(database, 'mx-then-us')
+      try {
+        const google = { resourceName: 'people/mx1', names: [{ displayName: 'Mexico City' }], phoneNumbers: [{ value: mexRaw, canonicalForm: mexCanonical() }] }
+        expect(await reconcileGoogleContacts(user.db, user.id, [google])).toMatchObject({ imported: 1 })
+
+        const card = vcard(`UID:uid-us\r\nFN:New Jersey\r\nTEL:${['+1', usNumber()].join(' ')}`)
+        const outcome = await importVcf(user.db, user.id, card)
+        expect(outcome).toMatchObject({ imported: 1, updated: 0, skipped: [], conflicts: 0, errors: [] })
+        expect(await listContacts(user.db)).toHaveLength(2)
+
+        // Re-syncing keeps the same keys and the same two contacts.
+        const before = await keysOf(user)
+        expect(await reconcileGoogleContacts(user.db, user.id, [google])).toMatchObject({ imported: 0, updated: 1, skipped: [] })
+        expect(await importVcf(user.db, user.id, card)).toMatchObject({ imported: 0, updated: 1, skipped: [] })
+        expect(await keysOf(user)).toEqual(before)
+        expect(await listContacts(user.db)).toHaveLength(2)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('iCloud US card then a Google MX person with the same digits: different people', async () => {
+      const user = await createTestUser(database, 'us-then-mx')
+      try {
+        await importVcf(user.db, user.id, vcard(`UID:uid-us2\r\nFN:New Jersey\r\nTEL:${['+1', usNumber()].join(' ')}`))
+        const outcome = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/mx2', names: [{ displayName: 'Mexico City' }], phoneNumbers: [{ value: mexRaw, canonicalForm: mexCanonical() }] },
+        ])
+        expect(outcome).toMatchObject({ imported: 1, updated: 0, skipped: [], conflicts: 0 })
+        expect(await listContacts(user.db)).toHaveLength(2)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a Mexican contact matches the same Mexican number written with its country code', async () => {
+      const user = await createTestUser(database, 'mx-match')
+      try {
+        const manual = await seedLocal(user, { display_name: 'Manual Mexico' }, { phones: [['+52', mexRaw].join(' ')] })
+        const outcome = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/mx3', names: [{ displayName: 'Manual Mexico' }], phoneNumbers: [{ value: mexRaw, canonicalForm: mexCanonical() }] },
+        ])
+        expect(outcome).toMatchObject({ imported: 0, updated: 1, skipped: [] })
+        expect((await getContact(user.db, manual))!.platform_links.map((l) => l.platform_id)).toEqual(['people/mx3'])
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('rows with no stored key get the plain US reading once, and are then keyed', async () => {
+      const user = await createTestUser(database, 'backfill')
+      try {
+        const id = await seedLocal(user, { display_name: 'Old Row' })
+        await database.admin
+          .query('CREATE phone SET owner = $owner, contact = $contact, phone = "(212) 555-0100"', {
+            owner: user.id,
+            contact: new RecordId('contact', id),
+          })
+          .collect()
+        expect(await keysOf(user)).toEqual({ '(212) 555-0100': undefined })
+
+        const result = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/old', names: [{ displayName: 'Old Row' }], phoneNumbers: [{ value: '212-555-0100' }] },
+        ])
+        expect(result).toMatchObject({ imported: 0, updated: 1 })
+        expect(await keysOf(user)).toEqual({ '(212) 555-0100': '+12125550100' })
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('editing a phone\'s raw text without a new key clears the old key, so it is recomputed, never trusted', async () => {
+      const user = await createTestUser(database, 'edited')
+      try {
+        const id = await seedLocal(user, { display_name: 'Edited' }, { phones: ['(212) 555-0100'] })
+        expect(await keysOf(user)).toEqual({ '(212) 555-0100': '+12125550100' })
+
+        await user.db.query('UPDATE phone SET phone = "(202) 555-0143"').collect()
+        expect(await keysOf(user)).toEqual({ '(202) 555-0143': undefined })
+
+        // Matching uses the recomputed key for the new text, not the old number.
+        const result = await reconcileGoogleContacts(user.db, user.id, [
+          { resourceName: 'people/new-number', names: [{ displayName: 'Edited' }], phoneNumbers: [{ value: '202-555-0143' }] },
+          { resourceName: 'people/old-number', names: [{ displayName: 'Stranger' }], phoneNumbers: [{ value: '212-555-0100' }] },
+        ])
+        expect(result).toMatchObject({ imported: 1, updated: 1, skipped: [] })
+        expect((await getContact(user.db, id))!.platform_links.map((l) => l.platform_id)).toEqual(['people/new-number'])
+        expect(await keysOf(user)).toMatchObject({ '(202) 555-0143': '+12025550143' })
+
+        // Supplying the new key with the edit is accepted as is.
+        await user.db.query('UPDATE phone SET phone = "(313) 555-0100", phone_key = "+13135550100" WHERE phone = "(202) 555-0143"').collect()
+        expect(await keysOf(user)).toMatchObject({ '(313) 555-0100': '+13135550100' })
+      } finally {
+        await user.db.close()
+      }
     })
   })
 

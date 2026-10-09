@@ -1,5 +1,6 @@
 import type { RecordId } from 'surrealdb'
 import { lastDefined, parseDateTime, recordId, runTransaction, toPlain, type Db } from './client'
+import { normalizePhone } from '@/lib/sync/phone'
 import type { ContactDto, ContactFilter, Platform } from './types'
 
 export const DEFAULT_PAGE_SIZE = 100
@@ -31,6 +32,10 @@ export interface ChannelInput {
   value: string
   label?: string | null
   is_primary?: boolean
+  // Phones only: the match key the importer decided on (null when the value is
+  // not a keyable number). When omitted it is computed with normalizePhone, so
+  // manual entry and iCloud get the plain US-default reading.
+  key?: string | null
 }
 
 export interface PlatformLinkInput {
@@ -124,7 +129,7 @@ FOR $e IN $emails {
   CREATE email CONTENT { owner: $owner, contact: $contact.id, email: $e.value, label: $e.label, is_primary: $e.is_primary };
 };
 FOR $p IN $phones {
-  CREATE phone CONTENT { owner: $owner, contact: $contact.id, phone: $p.value, label: $p.label, is_primary: $p.is_primary };
+  CREATE phone CONTENT { owner: $owner, contact: $contact.id, phone: $p.value, phone_key: $p.key, label: $p.label, is_primary: $p.is_primary };
 };
 FOR $l IN $links {
   CREATE platform_link CONTENT { owner: $owner, contact: $contact.id, platform: $l.platform, platform_id: $l.platform_id, last_synced_at: time::now() };
@@ -138,6 +143,15 @@ function channels(values: ChannelInput[] | undefined, fallbackLabel: string) {
     value: entry.value,
     label: entry.label ?? fallbackLabel,
     is_primary: entry.is_primary ?? index === 0,
+  }))
+}
+
+function phoneChannels(values: ChannelInput[] | undefined) {
+  return (values ?? []).map((entry, index) => ({
+    value: entry.value,
+    label: entry.label ?? 'mobile',
+    is_primary: entry.is_primary ?? index === 0,
+    key: entry.key !== undefined ? entry.key : normalizePhone(entry.value),
   }))
 }
 
@@ -157,7 +171,7 @@ export async function createContact(db: Db, owner: RecordId, input: NewContact):
         is_financial_advisor: input.fields.is_financial_advisor ?? false,
       },
       emails: channels(input.emails, 'personal'),
-      phones: channels(input.phones, 'mobile'),
+      phones: phoneChannels(input.phones),
       links: input.links ?? [],
     })
   const id = lastDefined<RecordId>(results)
@@ -216,7 +230,8 @@ export interface IdentityIndex {
   // Every contact that owns an address, so duplicates stay visible instead of
   // one silently shadowing another.
   emails: Map<string, Set<string>>
-  phones: Array<{ phone: string; contact: string }>
+  // `phone` is the raw text; `key` is the stored match key (null: not a number).
+  phones: Array<{ phone: string; key: string | null; contact: string }>
   // The provider links of one platform: provider id -> contact, and the
   // reverse.
   linkIds: Map<string, string>
@@ -226,16 +241,17 @@ export interface IdentityIndex {
 // Loads every identifier the importers use for duplicate matching. Reads are
 // scoped to the session user.
 export async function loadIdentityIndex(db: Db, platform: Platform = 'google'): Promise<IdentityIndex> {
+  await backfillPhoneKeys(db)
   const [emails, phones, links] = await db
     .query(
       `SELECT contact, email_lower FROM email WHERE owner = $auth;
-       SELECT contact, phone FROM phone WHERE owner = $auth;
+       SELECT contact, phone, phone_key FROM phone WHERE owner = $auth;
        SELECT contact, platform_id FROM platform_link WHERE owner = $auth AND platform = $platform`,
       { platform }
     )
     .collect<[
       { contact: RecordId; email_lower: string }[],
-      { contact: RecordId; phone: string }[],
+      { contact: RecordId; phone: string; phone_key: string | null }[],
       { contact: RecordId; platform_id: string }[],
     ]>()
 
@@ -247,10 +263,29 @@ export async function loadIdentityIndex(db: Db, platform: Platform = 'google'): 
   }
   return {
     emails: emailIndex,
-    phones: phones.map((row) => ({ phone: row.phone, contact: String(row.contact.id) })),
+    // Only stored keys are used; raw text is never re-parsed here.
+    phones: phones.map((row) => ({ phone: row.phone, key: row.phone_key, contact: String(row.contact.id) })),
     linkIds: new Map(links.map((row) => [row.platform_id, String(row.contact.id)])),
     linkByContact: new Map(links.map((row) => [String(row.contact.id), row.platform_id])),
   }
+}
+
+// Rows written before keys were stored, or whose raw text was edited without a
+// key, have none. Give them the plain US-default reading once; from then on the
+// stored key is the only thing matching looks at.
+export async function backfillPhoneKeys(db: Db): Promise<number> {
+  const [rows] = await db
+    .query('SELECT id, phone FROM phone WHERE owner = $auth AND phone_key = NONE')
+    .collect<[{ id: RecordId; phone: string }[]]>()
+  if (rows.length === 0) return 0
+  await runTransaction(
+    db,
+    `BEGIN;
+     FOR $row IN $rows { UPDATE $row.id SET phone_key = $row.key; };
+     COMMIT;`,
+    { rows: rows.map((row) => ({ id: row.id, key: normalizePhone(row.phone) })) }
+  )
+  return rows.length
 }
 
 // The contact one provider identity is linked to, if any: a single indexed
