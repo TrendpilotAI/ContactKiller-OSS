@@ -175,12 +175,19 @@ templates and gates), the per-ticket output of `bd provenance log --json`, and
 the audit log, using the same email, phone, Supabase, forbidden-content,
 private-identifier, machine-path and secret-pattern checks as
 `scripts/check-public-release.ts`, then gitleaks. Before trusting the export it
-also fails if an export owner exclusion is configured (`export.exclude_owner` or
-`export.exclude_owners`, nested or dotted in `.beads/config.yaml`, or from the
-environment) and if the export does not hold exactly the tickets
-`bd list --all --limit 0` shows. `bd export` silently drops excluded owners,
-which would let a scan pass on an empty or partial export while a push still
-publishes everything. It also fails if any scanned file contains a gitleaks
+also fails if an export owner exclusion or a directory label filter is
+configured anywhere: `export.exclude_owner*` or `directory.label*` in
+`.beads/config.yaml` (nested or dotted, including a `directory:` map, which
+`bd config get` cannot see), in the environment, or as a row of the Dolt config
+table (read with `bd config list --json`; `bd config get` never reads that
+table, yet `bd export` does, and it travels with `refs/dolt/data`). It then
+requires the export to match what `bd list --all --limit 0 --skip-labels`
+shows (read from its `{issues, meta, schema_version}` envelope; any other shape
+fails): same record count before de-duplication, no duplicate ids on either
+side, and the same id, status and `updated_at` per record. `bd export`
+silently drops excluded owners, and a bare `bd list` silently applies
+`directory.labels`, which would let a scan pass on an empty or partial export
+while a push still publishes everything. It also fails if any scanned file contains a gitleaks
 allow comment, which would suppress findings. It does **not** see the kv, config and events tables, provenance rows of
 tickets that no longer exist, or the Dolt commit history. A green scan therefore
 does not prove that history is clean; only the rule above does.
@@ -190,9 +197,19 @@ it:
 
 1. Make sure no private detail was ever written to the tracker (the rule above).
 2. Push with `scripts/bd-push.sh`, never a bare `bd dolt push`. It runs
-   `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`, `gitleaks`),
-   repeats the owner-exclusion, listing and allow-comment guards on a fresh
-   export, and only then runs `bd dolt push --no-adopt`. It accepts no
+   the following, in order (needs `bd`, `jq`, `bun`, `gitleaks`): require a
+   clean Dolt working set (`bd dolt commit` must print "Nothing to commit."; if
+   it commits pending changes the push aborts so you can review and re-run),
+   record Dolt HEAD (`bd vc status --json`) and a digest of `bd export --all`,
+   run the one full content scan (`scripts/check-public-release.ts`,
+   `scripts/check-beads-export.sh --local` with its guards and gitleaks, and the
+   allow-comment check on `.beads`), then re-check that the working set is still
+   clean, HEAD is unchanged and the export digest is identical, and only then
+   run `bd dolt push --no-adopt`. Content that changes between the scan and the
+   push therefore aborts it. The remaining window is the few milliseconds
+   between those last checks and the push itself; bd 1.3.1 has no lock or
+   compare-and-swap for `bd dolt push`, so do not run other bd writers while
+   publishing. It accepts no
    arguments, or exactly `--remote origin`; everything else (`-C`,
    `--directory`, `--db`, `--readonly`, `--sandbox`, `--dolt-auto-commit`,
    `--force`, and so on) is rejected, so the push always targets the workspace
@@ -290,13 +307,16 @@ environment also disables them; CI sets it and runs `bd metrics off`.
 `PUBLIC_RELEASE_MANIFEST.json` `allowedFiles`. Pass `--scan-export <file>...`
 to run only the content checks on arbitrary files, as the export scan does. It
 also fails, in every tracked file and in exports, itself included, on: internal
-cloud-agent ids (full UUID form, and `bc` plus a separator plus 8 or more hex
-digits), internal factory task ids (any case, with or without separators, such
-as an underscore- or space-separated form followed by a digit), the
-originating-agent name (any case, optional separator), machine paths
-(a box home directory, a workspace-root path, an agent data directory), Google OAuth client
-secrets, and bearer tokens. Its own patterns are written so their source cannot
-match.
+cloud-agent ids (full UUID form, and lowercase `bc` plus `-` or `_` plus 8 or
+more hex digits), internal factory task ids (any case; at a word boundary, with
+an optional `-`, `_` or space separators and a digit, so ordinary words ending
+in the same letters do not match), the originating-agent name (any case,
+optional separator), a box home directory path, Google OAuth client secrets,
+and bearer tokens followed by a 20+ character token-shaped value with no
+spaces or slashes. In ticket data (`--scan-export`) it additionally flags
+workspace-root and agent-data paths and any bearer-looking value, which are
+ordinary in files such as Dockerfiles but have no place in tickets. Its own
+patterns are written so their source cannot match.
 
 ## Non-Interactive Shell Commands
 
