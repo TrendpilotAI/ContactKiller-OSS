@@ -43,9 +43,9 @@ bd 1.3.1 does have a native provenance table (`bd provenance record`, `log`
 and `by-ref`; an append-only `provenance_events` table). **This repo does not
 use it, and `bd provenance record` is forbidden here.** The table is not part of
 `bd export`, `bd dolt push` would publish it with its full history, and nothing
-in the PR flow makes it reviewable. The export scan dumps `bd provenance log
---json` for every ticket and fails if any row exists. Provenance instead uses
-this fixed mapping:
+in the PR flow makes it reviewable. The export scan checks
+`SELECT COUNT(*) FROM provenance_events` and fails unless it is 0 (this also
+covers rows of deleted tickets). Provenance instead uses this fixed mapping:
 
 | Fact | Where it lives |
 | --- | --- |
@@ -171,10 +171,12 @@ retracted.** That makes the following a hard rule:
 
 **What the scan does and does not prove.** `scripts/check-beads-export.sh` scans
 the current rows of `bd export --all` (issues, memories, infrastructure records,
-templates and gates), the per-ticket output of `bd provenance log --json`, the
-config table's values, dumps of the synced tables listed below, and the audit
-log, using the same email, phone, Supabase, forbidden-content,
-private-identifier, machine-path and secret-pattern checks as
+templates and gates), the audit log, the raw contents of the `config`,
+`metadata`, `child_counters`, `issue_counter` and `schema_migrations` tables
+(bd kv values live in `config` as `kv.*` rows, which `bd config list` does not
+show), `bd config list --json`, and every change made by the Dolt commits after
+the trusted baseline (below), using the same email, phone, Supabase,
+forbidden-content, private-identifier, machine-path and secret-pattern checks as
 `scripts/check-public-release.ts`, then gitleaks. It needs `bd`, `jq`, `bun`,
 `git`, gitleaks 8.30.x and the standalone `dolt` CLI, and fails if any is
 missing.
@@ -205,22 +207,48 @@ Before trusting the export it also fails if:
   (so a repository `.gitleaksignore` can never suppress a finding on ticket
   data), and without `GITLEAKS_CONFIG*` overrides; and `bd-push.sh` requires
   gitleaks 8.30.x;
-- one of the synced tables below is not empty (see next paragraph).
+- the Dolt store has a table that is not on the known list, or the
+  `dolt_ignore` patterns changed, or one of the tables below is not empty.
 
-**Synced tables outside the export.** `bd dolt push` publishes whole tables that
-`bd export` does not contain: `issue_snapshots`, `compaction_snapshots`,
-`federation_peers`, `interactions` (the Dolt table, not the audit log file),
-`routes`, `metadata`, `custom_types` and `custom_statuses`. The scan reads them
-with the `dolt` CLI. Every one of them except `metadata` must be empty, and
-`metadata` may hold only bd's own bookkeeping keys (`_project_id`, `clone_id`,
-`last_import_time`, `repo_id`); anything else fails the scan. Their contents are
-also dumped into the scan directory and run through the scanners and gitleaks.
+**Which tables `bd dolt push` publishes.** The Dolt database holds 30 tables and
+2 views. Only tables that are committed are pushed; bd marks others
+with `dolt_ignore`, so they are never committed and never published.
+- *Published and in `bd export`:* `issues`, `labels`, `comments`, `dependencies`.
+- *Published, required to be empty:* `issue_snapshots`, `compaction_snapshots`,
+  `federation_peers`, `interactions` (the Dolt table, not the audit log file),
+  `routes`, `custom_types`, `custom_statuses`, `provenance_events`.
+- *Published and dumped for scanning:* `config` (including `kv.*` rows),
+  `metadata` (only bd's bookkeeping keys `_project_id`, `clone_id`,
+  `last_import_time`, `repo_id` are allowed), `child_counters`, `issue_counter`,
+  `schema_migrations`.
+- *Never pushed (`dolt_ignore`d):* `bd_events_journal`, `bd_events_seq`,
+  `events`, `ignored_schema_migrations`, `leases`, `local_metadata`,
+  `repo_mtimes`, `wisps` and every `wisp_*` table. (`bd history <id> --events`
+  reads `events`, which is why it is local to a clone.)
+- *Views, no data:* `blocked_issues`, `ready_issues`.
 
-**Not covered.** The kv and events tables, the lease, wisp and counter tables,
-provenance rows of tickets that no longer exist, and the Dolt commit history are
-published but not read. Dolt history is not scanned from inside bd (it could be
-walked with the `dolt` CLI, which nothing here does yet), so a green scan does
-not prove that history is clean; only the rule above does.
+**Dolt history.** `bd dolt push` publishes every commit, so the scan also reads
+history with the `dolt` CLI. In published mode (and in `--local` mode) it takes
+the trusted baseline in `scripts/beads-history-baseline.txt` (a Dolt commit; it
+must be an ancestor of HEAD) and dumps every change made by the commits after
+it: row-level diffs (`dolt_diff_<table>`, added, modified and removed rows) of
+every touched table, `dolt_history_config`, the commit messages and the net
+`dolt diff`. Those dumps go through the scanners and gitleaks, and a forbidden
+config key (`export.exclude_owner*`, `directory.label*`, `dolt.auto-push`, any
+case) fails the run even if a later commit unset it. A touched table outside the
+published set fails as well, including one created and dropped inside the range.
+`bd-push.sh` does the same for the commits the push itself would publish: it
+runs `dolt fetch` for the remote, takes the remote's head (or all history when
+the remote has none), refuses a head that is not an ancestor of local HEAD, and
+scans everything after it before pushing. History at or before the baseline was
+reviewed by hand and is out of scope; only the owner moves the baseline (it is
+CODEOWNERS-protected).
+
+**Not covered.** History at or before the baseline commit, the `dolt_ignore`d
+tables (never pushed), and anything bd keeps outside the Dolt database. The
+scan can only see what the pinned `bd`, `dolt` and gitleaks versions expose, so
+a green scan is strong evidence, not proof; the hard rule above is what keeps
+history clean in the first place.
 
 To publish ticket data, and only when the task or owner explicitly authorises
 it:
@@ -234,10 +262,13 @@ it:
    it commits pending changes the push aborts so you can review and re-run),
    record Dolt HEAD (`bd vc status --json`) and a digest of `bd export --all`,
    run the one full content scan (`scripts/check-public-release.ts`,
-   `scripts/check-beads-export.sh --local` with its guards, synced-table check
-   and gitleaks, and the allow-comment check on `.beads`), then re-check that the working set is still
-   clean, HEAD is unchanged and the export digest is identical, and only then
-   run `bd dolt push --no-adopt`. Content that changes between the scan and the
+   `scripts/check-beads-export.sh --local` with its guards, table checks,
+   baseline history scan and gitleaks, and the allow-comment check on `.beads`),
+   fetch the remote and scan every Dolt commit it does not have yet (a
+   forbidden key set and later unset, or a private value added and later
+   removed, is refused even if the final state is clean), then re-check that the
+   working set is still clean, HEAD is unchanged and the export digest is
+   identical, and only then run `bd dolt push --no-adopt`. Content that changes between the scan and the
    push therefore aborts it. The remaining window is the few milliseconds
    between those last checks and the push itself; bd 1.3.1 has no lock or
    compare-and-swap for `bd dolt push`, so do not run other bd writers while
@@ -261,11 +292,11 @@ missing tool, an existing local database in published mode, a `sync.remote` that
 is not `git+https://github.com/<owner>/<repo>`, a `.beads/metadata.json` that is
 not embedded Dolt, a bootstrap whose output lacks the exact line
 `Synced database from <that remote>` (for example a local import or a fresh
-init), a failed export, an empty export while
-tickets are expected, an expected ticket missing from the export, a published
-ticket with no `bd create` audit entry, any native provenance row, a non-empty
-synced table, `dolt.auto-push` enabled anywhere, or any scanner error fails the
-job.
+init), a failed export, an empty export while tickets are expected, an expected
+ticket missing from the export, a published ticket with no `bd create` audit
+entry, a non-empty provenance or other must-be-empty table, an unknown table,
+`dolt.auto-push` enabled anywhere, a forbidden config key or private value in
+any Dolt commit after the baseline, or any scanner error fails the job.
 
 - **Which tickets are expected.** Every `bd create` event in the audit log,
   except those whose latest event for that id is a `bd delete`. When you delete
