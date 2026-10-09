@@ -172,9 +172,16 @@ retracted.** That makes the following a hard rule:
 **What the scan does and does not prove.** `scripts/check-beads-export.sh` scans
 the current rows of `bd export --all` (issues, memories, infrastructure records,
 templates and gates), the per-ticket output of `bd provenance log --json`, and
-the audit log, using the same email, phone, Supabase, forbidden-content and
-private-identifier checks as `scripts/check-public-release.ts`, then gitleaks.
-It does **not** see the kv, config and events tables, provenance rows of
+the audit log, using the same email, phone, Supabase, forbidden-content,
+private-identifier, machine-path and secret-pattern checks as
+`scripts/check-public-release.ts`, then gitleaks. Before trusting the export it
+also fails if an export owner exclusion is configured (`export.exclude_owner` or
+`export.exclude_owners`, nested or dotted in `.beads/config.yaml`, or from the
+environment) and if the export does not hold exactly the tickets
+`bd list --all --limit 0` shows. `bd export` silently drops excluded owners,
+which would let a scan pass on an empty or partial export while a push still
+publishes everything. It also fails if any scanned file contains a gitleaks
+allow comment, which would suppress findings. It does **not** see the kv, config and events tables, provenance rows of
 tickets that no longer exist, or the Dolt commit history. A green scan therefore
 does not prove that history is clean; only the rule above does.
 
@@ -183,12 +190,16 @@ it:
 
 1. Make sure no private detail was ever written to the tracker (the rule above).
 2. Push with `scripts/bd-push.sh`, never a bare `bd dolt push`. It runs
-   `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`, `gitleaks`)
-   and only then `bd dolt push`. The scan is required, but it is a backstop, not
+   `scripts/check-beads-export.sh --local` (needs `bd`, `jq`, `bun`, `gitleaks`),
+   repeats the owner-exclusion, listing and allow-comment guards on a fresh
+   export, and only then runs `bd dolt push --no-adopt`. It accepts no
+   arguments, or exactly `--remote origin`; everything else (`-C`,
+   `--directory`, `--db`, `--readonly`, `--sandbox`, `--dolt-auto-commit`,
+   `--force`, and so on) is rejected, so the push always targets the workspace
+   and remote that were scanned. The scan is required, but it is a backstop, not
    permission to be careless.
 3. Never force-push, delete, or replace `refs/dolt/data`; `bd-push.sh` refuses
-   `--force`, `--force=...` and short flag clusters containing `f`. Replacement
-   is an owner-only decision.
+   any force flag. Replacement is an owner-only decision.
 
 CI runs the same scan on the published data in
 `.github/workflows/beads-export.yml` (a separate workflow so the daily run does
@@ -223,10 +234,11 @@ scanner error fails the job.
   `github.event.before` (skipped for the all-zeros SHA of a new ref). A file
   that is missing on the previous revision passes; a previous revision that is
   not available in the clone fails.
-- **Failure alerts.** When a scheduled or manually dispatched run fails, the
-  `alert` job opens, or comments on, an open issue titled "Beads export scan
-  failing" that links to the run. It never copies scan output, since that may
-  contain the leaked value. Only that job has `issues: write`.
+- **Failure alerts.** When a scheduled, manually dispatched, or push-to-`main`
+  run fails, the `alert` job opens, or comments on, an open issue titled "Beads
+  export scan failing" that links to the run. It never copies scan output,
+  since that may contain the leaked value. Only that job has `issues: write`,
+  and its condition excludes `pull_request` events (including forks) entirely.
 - **Scheduled runs can go dormant.** GitHub disables scheduled workflows in a
   public repository after 60 days without repository activity. If the daily scan
   stops appearing in the Actions tab, re-enable it with
@@ -277,10 +289,14 @@ environment also disables them; CI sets it and runs `bd metrics off`.
 `.beads/interactions.jsonl`; any other new tracker file must be added to
 `PUBLIC_RELEASE_MANIFEST.json` `allowedFiles`. Pass `--scan-export <file>...`
 to run only the content checks on arbitrary files, as the export scan does. It
-also fails on internal cloud-agent ids (full UUID form, and the `bc-` plus 8-hex
-short form when it contains a digit), internal factory task ids and
-originating-agent names in every tracked file, itself included; its own patterns
-are written so their source cannot match.
+also fails, in every tracked file and in exports, itself included, on: internal
+cloud-agent ids (full UUID form, and `bc` plus a separator plus 8 or more hex
+digits), internal factory task ids (any case, with or without separators, such
+as an underscore- or space-separated form followed by a digit), the
+originating-agent name (any case, optional separator), machine paths
+(a box home directory, a workspace-root path, an agent data directory), Google OAuth client
+secrets, and bearer tokens. Its own patterns are written so their source cannot
+match.
 
 ## Non-Interactive Shell Commands
 

@@ -64,13 +64,18 @@ jobs:
             : > "$baseline"
           fi
           echo "BEADS_AUDIT_BASELINE=$baseline" >> "$GITHUB_ENV"
+      - name: Guard tests (real bd)
+        run: bun test scripts/beads-guard.test.ts
       - name: Bootstrap published tracker data, export, and scan
         run: scripts/check-beads-export.sh
 
   alert:
     name: Open or update the failure issue
     needs: beads-export
-    if: ${{ always() && needs.beads-export.result == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    # Only events that run on the default branch's own code can reach this job:
+    # never pull_request (including forks). A push trigger is limited to main by
+    # the `on.push.branches` filter above.
+    if: ${{ always() && needs.beads-export.result == 'failure' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-24.04
     permissions:
       issues: write
@@ -83,7 +88,7 @@ jobs:
         shell: bash
         run: |
           title="Beads export scan failing"
-          body="The scheduled or manually dispatched Beads export scan failed. See the run for details: ${RUN_URL}"
+          body="The Beads export scan failed on a scheduled, manually dispatched, or main-branch run. See the run for details: ${RUN_URL}"
           existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number,title \
             --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
           if [ -n "$existing" ]; then
