@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { people_v1 } from 'googleapis'
 import { RecordId } from 'surrealdb'
-import { createContact, fileConflictsOnce, findContactByLink, getContact, listContacts } from '@/lib/db/contacts'
+import { backfillPhoneKeys, createContact, fileConflictsOnce, findContactByLink, getContact, listContacts } from '@/lib/db/contacts'
 import { FA_EMAIL_DOMAINS } from '@/lib/fa-detection'
 import { finishSyncLog, startSyncLog } from '@/lib/db/sync-logs'
 import { normalizePhone, reconcileGoogleContacts } from '@/lib/sync/google'
@@ -30,7 +30,7 @@ const vcard = (body: string) =>
 
 // Wraps a connection so the identity-index read returns what it saw but then
 // waits: the caller decides who to link while the world moves underneath it.
-function withHeldIdentityIndex(db: TestUser['db']) {
+function withHeldIdentityIndex(db: TestUser['db'], needle = 'platform = $platform') {
   let release: () => void = () => undefined
   const held = new Promise<void>((resolve) => {
     release = resolve
@@ -41,14 +41,19 @@ function withHeldIdentityIndex(db: TestUser['db']) {
       if (property !== 'query') return typeof value === 'function' ? value.bind(target) : value
       return (sql: string, vars?: Record<string, unknown>) => {
         const query = target.query(sql, vars)
-        if (!sql.includes('FROM platform_link WHERE owner')) return query
-        return {
-          collect: async (...args: number[]) => {
-            const rows = await query.collect(...args)
-            await held
-            return rows
+        if (!sql.includes(needle)) return query
+        // Only the read is held; every other method behaves as usual.
+        return new Proxy(query, {
+          get(queryTarget, queryProperty) {
+            const member = Reflect.get(queryTarget, queryProperty, queryTarget)
+            if (queryProperty !== 'collect') return typeof member === 'function' ? member.bind(queryTarget) : member
+            return async (...args: number[]) => {
+              const rows = await queryTarget.collect(...args)
+              await held
+              return rows
+            }
           },
-        }
+        })
       }
     },
   }) as typeof db
@@ -369,6 +374,25 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         expect(phoneKey(['+52', '55 1234 5678'].join(' '), us)).toBeNull()
         // Digits that only agree after discarding leading digits are not "equal".
         expect(phoneKey(['99', '55 1234 5678'].join(''), mexico)).toBeNull()
+      })
+
+      test('a canonical form we cannot validate is only a fallback to the US reading when its country is code 1', () => {
+        const unvalidatable = ['+52', '123'].join('')
+        // The provider said "Mexico" but we cannot confirm it: no US guess.
+        expect(phoneKey('(212) 555-0100', unvalidatable)).toBeNull()
+        expect(phoneKey('(212) 555-0100', ['+44', '12'].join(''))).toBeNull()
+        expect(phoneKey('(212) 555-0100', '+abc')).toBeNull()
+        expect(phoneKey('(212) 555-0100 x5', unvalidatable)).toBeNull()
+        // Code 1 is the US/NANP, so the US reading is the right one.
+        expect(phoneKey('(212) 555-0100', ['+1', '123'].join(''))).toBe('+12125550100')
+        expect(phoneKey('(212) 555-0100 x5', ['+1', '123'].join(''))).toBe('+12125550100;ext=5')
+        // Saying nothing is not the same as saying something unverifiable.
+        expect(phoneKey('(212) 555-0100')).toBe('+12125550100')
+        expect(phoneKey('(212) 555-0100', null)).toBe('+12125550100')
+        expect(phoneKey('(212) 555-0100', '')).toBe('+12125550100')
+        expect(phoneKey('(212) 555-0100', '   ')).toBe('+12125550100')
+        // Without a plus it is not an international canonical form at all.
+        expect(phoneKey('(212) 555-0100', 'not a number')).toBe('+12125550100')
       })
 
       test('a bare Mexican national number with an MX canonical form does not match a US contact', async () => {
@@ -1465,6 +1489,86 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         ])
         expect(result).toMatchObject({ imported: 0, updated: 1 })
         expect(await keysOf(user)).toEqual({ '(212) 555-0100': '+12125550100' })
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('backfill: bare numbers on Google contacts are not keyable; iCloud, manual, and +-prefixed rows are keyed', async () => {
+      const user = await createTestUser(database, 'backfill-google')
+      try {
+        const googleContact = await seedLocal(user, { display_name: 'From Google' }, { googleId: 'people/old-google' })
+        const icloudContact = await seedLocal(user, { display_name: 'From iCloud' })
+        const manualContact = await seedLocal(user, { display_name: 'Manual' })
+        await user.db
+          .query(
+            `CREATE platform_link SET owner = $owner, contact = $icloud, platform = 'icloud', platform_id = 'uid-old'`,
+            { owner: user.id, icloud: new RecordId('contact', icloudContact) }
+          )
+          .collect()
+        const rows: [string, string][] = [
+          [googleContact, '(212) 555-0100'],
+          [googleContact, ['+1', '212 555 0101'].join(' ')],
+          [icloudContact, '(212) 555-0102'],
+          [manualContact, '(212) 555-0103'],
+        ]
+        for (const [contact, phone] of rows) {
+          await database.admin
+            .query('CREATE phone SET owner = $owner, contact = $contact, phone = $phone', {
+              owner: user.id,
+              contact: new RecordId('contact', contact),
+              phone,
+            })
+            .collect()
+        }
+
+        expect(await backfillPhoneKeys(user.db)).toBe(4)
+        expect(await keysOf(user)).toEqual({
+          '(212) 555-0100': null,
+          [['+1', '212 555 0101'].join(' ')]: '+12125550101',
+          '(212) 555-0102': '+12125550102',
+          '(212) 555-0103': '+12125550103',
+        })
+        // Nothing left to do on a second pass.
+        expect(await backfillPhoneKeys(user.db)).toBe(0)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('backfill never overwrites a row that was edited or keyed after it was read', async () => {
+      const user = await createTestUser(database, 'backfill-guard')
+      try {
+        const id = await seedLocal(user, { display_name: 'Racy' })
+        const create = (phone: string) =>
+          database.admin
+            .query('CREATE phone SET owner = $owner, contact = $contact, phone = $phone', {
+              owner: user.id,
+              contact: new RecordId('contact', id),
+              phone,
+            })
+            .collect()
+        await create('(212) 555-0100')
+        await create('(212) 555-0101')
+        await create('(212) 555-0102')
+
+        const { stale, release } = withHeldIdentityIndex(user.db, 'phone_key = NONE')
+        const running = backfillPhoneKeys(stale)
+        await Bun.sleep(100)
+        // While the backfill holds its read: one row gets its key from someone
+        // else, one has its raw text edited, one is left alone.
+        await database.admin.query("UPDATE phone SET phone_key = '+12125550199' WHERE phone = '(212) 555-0100'").collect()
+        await database.admin.query("UPDATE phone SET phone = '(313) 555-0100' WHERE phone = '(212) 555-0101'").collect()
+        release()
+        await running
+
+        expect(await keysOf(user)).toEqual({
+          '(212) 555-0100': '+12125550199', // the concurrent key stands
+          '(313) 555-0100': undefined, // edited: stays unkeyed, recomputed next time
+          '(212) 555-0102': '+12125550102', // untouched: keyed
+        })
+        expect(await backfillPhoneKeys(user.db)).toBe(1)
+        expect(await keysOf(user)).toMatchObject({ '(313) 555-0100': '+13135550100' })
       } finally {
         await user.db.close()
       }

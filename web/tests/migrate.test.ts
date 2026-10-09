@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -12,7 +12,8 @@ import {
 } from '@/lib/db/migrate'
 import { connect } from '@/lib/db/client'
 import { isSignupEnabledInDatabase, setSignupEnabled } from '@/lib/db/settings'
-import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
+import { backfillPhoneKeys, createContact } from '@/lib/db/contacts'
+import { createTestUser, startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
 
 describe.skipIf(!surrealAvailable)('migrations', () => {
   let database: TestDatabase
@@ -151,6 +152,58 @@ describe.skipIf(!surrealAvailable)('migrations', () => {
       expect(await signupDirect('reapplied@example.com')).toHaveProperty('access')
     } finally {
       await isolated.stop()
+    }
+  })
+
+  test('rolling back phone keys drops the stored values, so re-applying recomputes them instead of resurrecting stale ones', async () => {
+    const isolated = await startTestDatabase()
+    try {
+      const user = await createTestUser(isolated, 'rollbackkeys')
+      try {
+        const id = await createContact(user.db, user.id, {
+          fields: { display_name: 'Keyed' },
+          phones: [{ value: '(212) 555-0100' }],
+        })
+        const read = async () => {
+          const [rows] = await isolated.admin
+            .query('SELECT phone, phone_key FROM phone')
+            .collect<[{ phone: string; phone_key?: string | null }[]]>()
+          return rows
+        }
+        expect(await read()).toEqual([{ phone: '(212) 555-0100', phone_key: '+12125550100' }])
+
+        const names = (await readMigrations()).map((file) => file.name)
+        const latest = names[names.length - 1]
+        expect(latest.startsWith('0007')).toBe(true)
+        expect(await rollbackLatest(isolated.admin, isolated.config, undefined, { confirm: true })).toBe(latest)
+        // The stored key is gone with the field.
+        expect(await read()).toEqual([{ phone: '(212) 555-0100' }])
+
+        // The number changes while the migration is rolled back.
+        await isolated.admin.query("UPDATE phone SET phone = '(202) 555-0143'").collect()
+
+        expect((await migrate(isolated.admin, isolated.config)).applied).toEqual([latest])
+        expect(await read()).toEqual([{ phone: '(202) 555-0143' }])
+
+        // Keys are recomputed from the current text.
+        expect(await backfillPhoneKeys(user.db)).toBe(1)
+        expect(await read()).toEqual([{ phone: '(202) 555-0143', phone_key: '+12025550143' }])
+        expect(id).toBeTruthy()
+      } finally {
+        await user.db.close()
+      }
+    } finally {
+      await isolated.stop()
+    }
+  })
+
+  test('no down migration leaves field data behind: only 0007 removes a field, and it unsets it first', async () => {
+    const dir = new URL('../surreal/migrations/', import.meta.url)
+    for (const file of (await readdir(dir)).filter((name) => name.endsWith('.down.surql'))) {
+      const sql = await Bun.file(new URL(file, dir)).text()
+      if (/REMOVE FIELD/i.test(sql)) {
+        expect(sql).toMatch(/UPDATE\s+\w+\s+UNSET\s+\w+;[\s\S]*REMOVE FIELD/i)
+      }
     }
   })
 

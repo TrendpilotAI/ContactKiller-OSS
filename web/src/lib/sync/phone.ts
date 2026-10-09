@@ -34,21 +34,30 @@ export function normalizePhone(phone: string): string | null {
 // The canonical form then decides the region: the raw number, read in the
 // canonical form's country, must be that very number. If it is not, the two
 // disagree and there is no key. The extension comes from the raw value, since
-// canonical forms do not carry one. A canonical form that is missing or is not
-// a valid international number is ignored and the raw value is parsed as US.
+// canonical forms do not carry one.
+//
+// A missing or blank canonical form means the provider said nothing, so the raw
+// value is parsed as US. A canonical form that is supplied but cannot be
+// validated is different: the provider asserted a country we cannot confirm. It
+// is only safe to fall back to the US reading when that country is the US/NANP
+// (calling code 1); for any other country there is no key.
 export function phoneKey(raw: string, canonicalForm?: string | null): string | null {
   const { base, extension } = splitExtension(raw)
   if (base === '' || !PHONE_CHARACTERS.test(base)) return null
 
   const canonical = canonicalForm?.trim()
-  if (canonical && canonical.startsWith('+') && PHONE_CHARACTERS.test(canonical)) {
-    const known = parseValid(canonical)
+  if (canonical && canonical.startsWith('+')) {
+    const known = PHONE_CHARACTERS.test(canonical) ? parseValid(canonical) : null
     if (known) {
       const asRead = parseValid(base, known.countryCallingCode)
       return asRead && asRead.format('E.164') === known.format('E.164')
         ? withExtension(known.format('E.164'), extension)
         : null
     }
+    // Calling codes are prefix-free, so digits starting with "1" are exactly
+    // code 1. Anything else, or text that is not even phone-shaped, has no key.
+    const claimsNanp = PHONE_CHARACTERS.test(canonical) && canonical.replace(/\D/g, '').startsWith('1')
+    if (!claimsNanp) return null
   }
   return withExtension(toE164(base), extension)
 }

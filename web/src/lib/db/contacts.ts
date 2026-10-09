@@ -271,19 +271,39 @@ export async function loadIdentityIndex(db: Db, platform: Platform = 'google'): 
 }
 
 // Rows written before keys were stored, or whose raw text was edited without a
-// key, have none. Give them the plain US-default reading once; from then on the
+// key, have none. They are keyed once, from the raw text, and from then on the
 // stored key is the only thing matching looks at.
+//
+// The reading is the plain US one (normalizePhone), except for a bare national
+// number on a contact that came from Google: Google had a canonical form for it
+// that we did not keep, so the country is unknown and the US reading could be
+// wrong. Those get NULL ("not keyable"); a number written with a leading "+"
+// carries its own country and is keyed normally. iCloud and manual rows never
+// had a canonical form and keep the US reading.
 export async function backfillPhoneKeys(db: Db): Promise<number> {
-  const [rows] = await db
-    .query('SELECT id, phone FROM phone WHERE owner = $auth AND phone_key = NONE')
-    .collect<[{ id: RecordId; phone: string }[]]>()
+  const [rows, googleLinks] = await db
+    .query(
+      `SELECT id, phone, contact FROM phone WHERE owner = $auth AND phone_key = NONE;
+       SELECT contact FROM platform_link WHERE owner = $auth AND platform = 'google'`
+    )
+    .collect<[{ id: RecordId; phone: string; contact: RecordId }[], { contact: RecordId }[]]>()
   if (rows.length === 0) return 0
+
+  const fromGoogle = new Set(googleLinks.map((link) => String(link.contact.id)))
+  const keyFor = (row: { phone: string; contact: RecordId }): string | null =>
+    !row.phone.trim().startsWith('+') && fromGoogle.has(String(row.contact.id))
+      ? null
+      : normalizePhone(row.phone)
+
+  // Guarded: a row that was edited or keyed since it was read is left alone.
   await runTransaction(
     db,
     `BEGIN;
-     FOR $row IN $rows { UPDATE $row.id SET phone_key = $row.key; };
+     FOR $row IN $rows {
+       UPDATE $row.id SET phone_key = $row.key WHERE phone = $row.phone AND phone_key = NONE;
+     };
      COMMIT;`,
-    { rows: rows.map((row) => ({ id: row.id, key: normalizePhone(row.phone) })) }
+    { rows: rows.map((row) => ({ id: row.id, phone: row.phone, key: keyFor(row) })) }
   )
   return rows.length
 }
