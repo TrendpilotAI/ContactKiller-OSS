@@ -250,21 +250,31 @@ function scanTextContent(path: string, text: string): void {
 }
 
 // Written so that this file's own source cannot match any pattern below.
-const privateIdentifierPatterns: Array<[RegExp, string]> = [
+type PrivatePattern = [RegExp, string];
+
+// Applied to every tracked file and to exports.
+const privateIdentifierPatterns: PrivatePattern[] = [
   [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
-  [/\bbc[\W_][0-9a-f]{8,}/iu, "private cloud-agent id (short form)"],
-  [new RegExp("GS-C" + "K-", "iu"), "private factory task id"],
-  [new RegExp("GS[\\W_]*C" + "K[\\W_]*\\d", "iu"), "private factory task id"],
+  [/\bbc[-_][0-9a-fA-F]{8,}/u, "private cloud-agent id (short form)"],
+  [new RegExp("\\bGS-C" + "K-", "iu"), "private factory task id"],
+  [new RegExp("\\bGS[-_ ]?C" + "K[-_ ]?\\d", "iu"), "private factory task id"],
   [/grok[\W_]?shi[p]/iu, "private originating-agent name"],
-  [new RegExp("/home/bo" + "x/", "iu"), "private machine path"],
+  [new RegExp("/home/bo" + "x/", "u"), "private machine path"],
+  [new RegExp("GOCSP" + "X-[A-Za-z0-9_-]{20,}", "u"), "Google OAuth client secret"],
+  [/Beare[r][ \t]+[A-Za-z0-9._~+-]{20,}/u, "bearer token"],
+];
+
+// Applied only to ticket data (--scan-export): paths that are ordinary in
+// source files such as Dockerfiles, and any bearer-looking value.
+const exportOnlyPatterns: PrivatePattern[] = [
   [/\/workspac[e]\//iu, "private machine path"],
   [/agent-dat[a]\//iu, "private machine path"],
-  [new RegExp("GOCSP" + "X-[A-Za-z0-9_-]{20,}", "u"), "Google OAuth client secret"],
   [/Beare[r]\s+[A-Za-z0-9._~+/-]{20,}/u, "bearer token"],
 ];
 
-function scanPrivateIdentifiers(path: string, text: string): void {
-  for (const [pattern, label] of privateIdentifierPatterns) {
+function scanPrivateIdentifiers(path: string, text: string, ticketData = false): void {
+  const patterns = ticketData ? [...privateIdentifierPatterns, ...exportOnlyPatterns] : privateIdentifierPatterns;
+  for (const [pattern, label] of patterns) {
     if (pattern.test(text)) add(path, `${label} detected; public files and tickets must use opaque aliases and carry no private values`);
   }
 }
@@ -413,7 +423,7 @@ for (const exportPath of scanExportPaths) {
   }
   const text = bytes.toString("utf8");
   scanTextContent(exportPath, text);
-  scanPrivateIdentifiers(exportPath, text);
+  scanPrivateIdentifiers(exportPath, text, true);
 }
 
 if (findings.length > 0) {

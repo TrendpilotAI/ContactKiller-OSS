@@ -188,48 +188,131 @@ describe("bd-push.sh", () => {
     expect(result.stderr).toContain("unsupported arguments");
   });
 
-  /** A throwaway repo with stub scans and a recording `bd`, so nothing real is pushed. */
-  function stubbed(dir: string): { env: NodeJS.ProcessEnv; calls: string } {
+  /**
+   * A throwaway repo with stub scans and a recording `bd` whose state lives in
+   * files (head, export content, dirty marker), so nothing real is pushed.
+   */
+  function stubbed(dir: string): { env: NodeJS.ProcessEnv; calls: string; state: string; script: string } {
     mkdirSync(join(dir, "scripts"));
     mkdirSync(join(dir, "bin"));
+    mkdirSync(join(dir, "state"));
     execFileSync("git", ["init", "-q"], { cwd: dir });
     writeFileSync(join(dir, "scripts/bd-push.sh"), readFileSync(bdPush));
+    writeFileSync(join(dir, "scripts/check-public-release.ts"), 'console.log("release stub");\n');
     for (const stub of ["check-beads-export.sh", "beads-guard.sh"]) {
-      writeFileSync(join(dir, "scripts", stub), '#!/usr/bin/env bash\necho "STUB $(basename "$0") $*" >> "$CALLS"\n');
+      writeFileSync(
+        join(dir, "scripts", stub),
+        '#!/usr/bin/env bash\necho "STUB $(basename "$0") $*" >> "$CALLS"\n[ -f "$STATE/hook-$(basename "$0")" ] && . "$STATE/hook-$(basename "$0")"\nexit 0\n',
+      );
     }
-    writeFileSync(join(dir, "bin/bd"), '#!/usr/bin/env bash\necho "bd $*" >> "$CALLS"\n');
+    writeFileSync(
+      join(dir, "bin/bd"),
+      `#!/usr/bin/env bash
+echo "bd $*" >> "$CALLS"
+case "$1 $2" in
+  "dolt commit")
+    if [ -f "$STATE/dirty" ]; then echo "Committed 1 change"; rm -f "$STATE/dirty"; else echo "Nothing to commit."; fi ;;
+  "vc status") printf '{"branch":"main","commit":"%s","schema_version":1}\n' "$(cat "$STATE/head")" ;;
+  "export --all") cp "$STATE/export" "$4" ;;
+esac
+exit 0
+`,
+    );
     for (const file of ["scripts/bd-push.sh", "scripts/check-beads-export.sh", "scripts/beads-guard.sh", "bin/bd"]) {
       chmodSync(join(dir, file), 0o755);
     }
     mkdirSync(join(dir, ".beads"));
+    const state = join(dir, "state");
+    writeFileSync(join(state, "head"), "head-one\n");
+    writeFileSync(join(state, "export"), '{"id":"a"}\n');
     const calls = join(dir, "calls.log");
-    return { env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, CALLS: calls }, calls };
+    return {
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, CALLS: calls, STATE: state },
+      calls,
+      state,
+      script: join(dir, "scripts/bd-push.sh"),
+    };
   }
 
-  test("with no arguments it scans, re-checks, then pushes with --no-adopt", () => {
+  const callsOf = (calls: string): string[] => {
+    try {
+      return readFileSync(calls, "utf8").trim().split("\n");
+    } catch {
+      return [];
+    }
+  };
+  const pushed = (calls: string): boolean => callsOf(calls).some((line) => line.startsWith("bd dolt push"));
+
+  test("with no arguments it scans once, re-checks, then pushes with --no-adopt", () => {
     withTempDir((dir) => {
-      const { env, calls } = stubbed(dir);
-      const result = spawnSync(join(dir, "scripts/bd-push.sh"), [], { cwd: dir, env, encoding: "utf8" });
+      const { env, calls, script } = stubbed(dir);
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
       expect(result.status).toBe(0);
-      const log = readFileSync(calls, "utf8").trim().split("\n");
-      expect(log[0]).toBe("STUB check-beads-export.sh --local");
-      expect(log).toContain("STUB beads-guard.sh config");
+      const log = callsOf(calls);
+      expect(log.filter((line) => line.startsWith("STUB check-beads-export.sh"))).toEqual(["STUB check-beads-export.sh --local"]);
+      expect(log.indexOf("bd dolt commit")).toBeLessThan(log.indexOf("STUB check-beads-export.sh --local"));
+      expect(log.lastIndexOf("bd dolt commit")).toBeGreaterThan(log.indexOf("STUB check-beads-export.sh --local"));
       expect(log.at(-1)).toBe("bd dolt push --no-adopt");
     });
   });
 
   test("--remote origin is passed through, and nothing is pushed if a scan fails", () => {
     withTempDir((dir) => {
-      const { env, calls } = stubbed(dir);
-      const ok = spawnSync(join(dir, "scripts/bd-push.sh"), ["--remote", "origin"], { cwd: dir, env, encoding: "utf8" });
+      const { env, calls, script } = stubbed(dir);
+      const ok = spawnSync(script, ["--remote", "origin"], { cwd: dir, env, encoding: "utf8" });
       expect(ok.status).toBe(0);
-      expect(readFileSync(calls, "utf8").trim().split("\n").at(-1)).toBe("bd dolt push --no-adopt --remote origin");
+      expect(callsOf(calls).at(-1)).toBe("bd dolt push --no-adopt --remote origin");
 
       rmSync(calls);
       writeFileSync(join(dir, "scripts/check-beads-export.sh"), "#!/usr/bin/env bash\nexit 1\n");
-      const failed = spawnSync(join(dir, "scripts/bd-push.sh"), [], { cwd: dir, env, encoding: "utf8" });
+      const failed = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
       expect(failed.status).not.toBe(0);
-      expect(() => readFileSync(calls, "utf8")).toThrow();
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("a dirty working set aborts before any scan and nothing is pushed", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "dirty"), "");
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("uncommitted changes");
+      expect(callsOf(calls).some((line) => line.startsWith("STUB check-beads-export.sh"))).toBe(false);
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("content that changes between the scan and the push aborts (Dolt HEAD moves)", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "hook-check-beads-export.sh"), 'echo head-two > "$STATE/head"\n');
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Dolt HEAD moved during the scan");
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("exported content that changes without a new commit aborts too", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "hook-check-beads-export.sh"), `echo '{"id":"a","title":"changed"}' > "$STATE/export"\n`);
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("exported tracker content changed");
+      expect(pushed(calls)).toBe(false);
+    });
+  });
+
+  test("a change that is still uncommitted after the scan aborts", () => {
+    withTempDir((dir) => {
+      const { env, calls, state, script } = stubbed(dir);
+      writeFileSync(join(state, "hook-check-beads-export.sh"), 'touch "$STATE/dirty"\n');
+      const result = spawnSync(script, [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("uncommitted changes");
+      expect(pushed(calls)).toBe(false);
     });
   });
 });
