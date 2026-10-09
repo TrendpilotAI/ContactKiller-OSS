@@ -1,16 +1,9 @@
 import type { RecordId } from 'surrealdb'
 import vCard from 'vcf'
 import type { Db } from '@/lib/db/client'
-import { createContact, loadIdentityIndex } from '@/lib/db/contacts'
-import { isLikelyFinancialAdvisor } from '@/lib/fa-detection'
+import { reconcileProviderContacts, type ProviderContact, type ReconcileResult } from './reconcile'
 
-export interface ImportResult {
-  imported: number
-  duplicates: number
-  errors: string[]
-}
-
-export interface VcfImportOutcome extends ImportResult {
+export interface VcfImportOutcome extends ReconcileResult {
   total: number
 }
 
@@ -21,15 +14,15 @@ export class EmptyVcfError extends Error {
   }
 }
 
-// Imports vCards for one user. A card is skipped as a duplicate when any of its
-// email addresses already belongs to one of the user's contacts.
-export async function importVcf(db: Db, userId: RecordId, vcfContent: string): Promise<VcfImportOutcome> {
-  const result: ImportResult = {
-    imported: 0,
-    duplicates: 0,
-    errors: [],
-  }
+const MAX_UID_LENGTH = 512
 
+// Imports vCards for one user under the same rules as the Google sync (see
+// reconcileProviderContacts): exact identifiers only, never names; matches fill
+// empty fields and file conflicts instead of overwriting; ambiguous cards are
+// skipped or imported on their own and reported. A card's UID is its stable
+// identity, so re-importing the same file updates contacts in place; a card
+// without a UID gets a throwaway id and is recognised only by email or phone.
+export async function importVcf(db: Db, userId: RecordId, vcfContent: string): Promise<VcfImportOutcome> {
   // The vcf parser only understands CRLF line endings; many exports use LF.
   const normalized = vcfContent.replace(/\r\n|\r|\n/g, '\r\n')
   if (normalized.trim() === '') {
@@ -40,68 +33,60 @@ export async function importVcf(db: Db, userId: RecordId, vcfContent: string): P
     throw new EmptyVcfError()
   }
 
-  const knownEmails = (await loadIdentityIndex(db)).emails
-
+  const contacts: ProviderContact[] = []
+  const extractionErrors: string[] = []
   for (const card of cards) {
     try {
-      const data = card.data || card
-
-      const fn = getString(data.fn)
-      const n = getString(data.n)
-      let firstName: string | null = null
-      let lastName: string | null = null
-
-      if (n) {
-        const nameParts = n.split(';')
-        lastName = nameParts[0] || null
-        firstName = nameParts[1] || null
-      }
-
-      const displayName = fn || [firstName, lastName].filter(Boolean).join(' ') || 'Unknown'
-
-      const emails = extractArray(data.email).map(e => ({
-        email: cleanValue(e),
-        label: getType(e) || 'personal',
-      })).filter(e => e.email && e.email.includes('@'))
-
-      const phones = extractArray(data.tel).map(p => ({
-        phone: cleanPhoneValue(p),
-        label: getType(p) || 'mobile',
-      })).filter(p => p.phone && p.phone.length >= 7)
-
-      const org = getString(data.org)?.split(';')[0] || null
-      const title = getString(data.title)
-
-      if (emails.some(e => knownEmails.has(e.email.toLowerCase()))) {
-        result.duplicates++
-        continue
-      }
-
-      const contactId = await createContact(db, userId, {
-        fields: {
-          first_name: firstName,
-          last_name: lastName,
-          display_name: displayName,
-          company: org,
-          job_title: title,
-          is_financial_advisor: isLikelyFinancialAdvisor(emails.map(e => e.email)),
-        },
-        emails: emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
-        phones: phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
-        links: [{ platform: 'icloud', platform_id: `icloud-import-${crypto.randomUUID()}` }],
-      })
-
-      for (const e of emails) {
-        knownEmails.set(e.email.toLowerCase(), new Set([contactId]))
-      }
-
-      result.imported++
+      contacts.push(toProviderContact(card.data || card))
     } catch (err) {
-      result.errors.push(`Error processing contact: ${err}`)
+      extractionErrors.push(`Error processing contact: ${err}`)
     }
   }
 
-  return { ...result, total: cards.length }
+  const result = await reconcileProviderContacts(db, userId, 'icloud', contacts)
+  return { ...result, errors: [...extractionErrors, ...result.errors], total: cards.length }
+}
+
+function toProviderContact(data: Record<string, unknown>): ProviderContact {
+  const fn = getString(data.fn)
+  const n = getString(data.n)
+  let firstName: string | null = null
+  let lastName: string | null = null
+
+  if (n) {
+    const nameParts = n.split(';')
+    lastName = nameParts[0] || null
+    firstName = nameParts[1] || null
+  }
+
+  const displayName = fn || [firstName, lastName].filter(Boolean).join(' ') || null
+
+  const emails = extractArray(data.email).map(e => ({
+    email: cleanValue(e),
+    label: getType(e) || 'personal',
+  })).filter(e => e.email && e.email.includes('@'))
+
+  const phones = extractArray(data.tel).map(p => ({
+    phone: cleanPhoneValue(p),
+    label: getType(p) || 'mobile',
+  })).filter(p => p.phone && p.phone.length >= 7)
+
+  const uid = getString(data.uid)?.trim()
+  const hasUid = !!uid && uid.length <= MAX_UID_LENGTH
+
+  return {
+    providerId: hasUid ? uid : `icloud-import-${crypto.randomUUID()}`,
+    stableId: hasUid,
+    fields: {
+      first_name: firstName,
+      last_name: lastName,
+      display_name: displayName,
+      company: getString(data.org)?.split(';')[0] || null,
+      job_title: getString(data.title),
+    },
+    emails,
+    phones,
+  }
 }
 
 // Helper functions for vCard parsing

@@ -74,6 +74,18 @@ export async function listUnresolvedConflicts(db: Db): Promise<ConflictDto[]> {
   return toPlain<ConflictDto[]>(rows)
 }
 
+// The first statement of the transaction claims the conflict: it flips
+// `resolved` only if it is still false, and aborts everything otherwise. Two
+// resolvers racing for one conflict therefore cannot both apply a value; the
+// loser (after SurrealDB's own write-conflict retry) finds it resolved.
+const CLAIM_SQL = `
+  LET $claimed = (UPDATE $id SET resolved = true, resolved_value = $value, resolved_at = time::now()
+                  WHERE resolved = false RETURN id);
+  IF array::len($claimed) = 0 {
+    IF array::len((SELECT id FROM $id)) = 0 { THROW "conflict_not_found"; };
+    THROW "already_resolved";
+  };`
+
 export async function resolveConflict(
   db: Db,
   key: string,
@@ -87,27 +99,32 @@ export async function resolveConflict(
   if (!conflict) return { status: 'not_found' }
   if (conflict.resolved) return { status: 'already_resolved' }
 
+  let sql: string
+  const vars: Record<string, unknown> = { id }
   if (choice === 'skip') {
-    await db
-      .query('UPDATE $id SET resolved = true, resolved_at = time::now()', { id })
-      .collect()
+    // Dismissed: resolved without applying anything.
+    sql = `BEGIN;${CLAIM_SQL}\nCOMMIT;`
+    vars.value = null
+  } else {
+    if (!isResolvableField(conflict.field)) {
+      return { status: 'unsupported_field', field: conflict.field }
+    }
+    // `conflict.field` is checked against RESOLVABLE_FIELDS above, so it is
+    // safe to use as an identifier here.
+    sql = `BEGIN;${CLAIM_SQL}
+      UPDATE $contact SET ${conflict.field} = $value;
+      COMMIT;`
+    vars.contact = conflict.contact
+    vars.value = choice === 'a' ? conflict.value_a : conflict.value_b
+  }
+
+  try {
+    await runTransaction(db, sql, vars)
     return { status: 'resolved' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (/already_resolved/.test(message)) return { status: 'already_resolved' }
+    if (/conflict_not_found/.test(message)) return { status: 'not_found' }
+    throw error
   }
-
-  if (!isResolvableField(conflict.field)) {
-    return { status: 'unsupported_field', field: conflict.field }
-  }
-
-  const value = choice === 'a' ? conflict.value_a : conflict.value_b
-  // `conflict.field` is checked against RESOLVABLE_FIELDS above, so it is safe
-  // to use as an identifier here.
-  await runTransaction(
-    db,
-    `BEGIN;
-     UPDATE $contact SET ${conflict.field} = $value;
-     UPDATE $id SET resolved = true, resolved_value = $value, resolved_at = time::now();
-     COMMIT;`,
-    { id, contact: conflict.contact, value }
-  )
-  return { status: 'resolved' }
 }

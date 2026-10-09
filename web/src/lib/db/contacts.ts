@@ -217,18 +217,21 @@ export interface IdentityIndex {
   // one silently shadowing another.
   emails: Map<string, Set<string>>
   phones: Array<{ phone: string; contact: string }>
-  googleIds: Map<string, string>
-  googleLinkByContact: Map<string, string>
+  // The provider links of one platform: provider id -> contact, and the
+  // reverse.
+  linkIds: Map<string, string>
+  linkByContact: Map<string, string>
 }
 
 // Loads every identifier the importers use for duplicate matching. Reads are
-// scoped to the session user by table permissions.
-export async function loadIdentityIndex(db: Db): Promise<IdentityIndex> {
+// scoped to the session user.
+export async function loadIdentityIndex(db: Db, platform: Platform = 'google'): Promise<IdentityIndex> {
   const [emails, phones, links] = await db
     .query(
       `SELECT contact, email_lower FROM email WHERE owner = $auth;
        SELECT contact, phone FROM phone WHERE owner = $auth;
-       SELECT contact, platform_id FROM platform_link WHERE owner = $auth AND platform = 'google'`
+       SELECT contact, platform_id FROM platform_link WHERE owner = $auth AND platform = $platform`,
+      { platform }
     )
     .collect<[
       { contact: RecordId; email_lower: string }[],
@@ -245,9 +248,21 @@ export async function loadIdentityIndex(db: Db): Promise<IdentityIndex> {
   return {
     emails: emailIndex,
     phones: phones.map((row) => ({ phone: row.phone, contact: String(row.contact.id) })),
-    googleIds: new Map(links.map((row) => [row.platform_id, String(row.contact.id)])),
-    googleLinkByContact: new Map(links.map((row) => [String(row.contact.id), row.platform_id])),
+    linkIds: new Map(links.map((row) => [row.platform_id, String(row.contact.id)])),
+    linkByContact: new Map(links.map((row) => [String(row.contact.id), row.platform_id])),
   }
+}
+
+// The contact one provider identity is linked to, if any: a single indexed
+// lookup for callers that only need to resolve one id.
+export async function findContactByLink(db: Db, platform: Platform, platformId: string): Promise<string | null> {
+  const [rows] = await db
+    .query(
+      'SELECT contact FROM platform_link WHERE owner = $auth AND platform = $platform AND platform_id = $platformId LIMIT 1',
+      { platform, platformId }
+    )
+    .collect<[{ contact: RecordId }[]]>()
+  return rows[0] ? String(rows[0].contact.id) : null
 }
 
 export interface ConflictEntry {
@@ -258,47 +273,76 @@ export interface ConflictEntry {
   source_b: string
 }
 
-// Files conflicts for a contact, skipping any that are already on record (open
-// or resolved), so repeating a sync never re-raises a disagreement. Returns how
-// many were new.
+// Creates a conflict unless the same disagreement is already on record (open
+// or resolved). The check runs inside the transaction and the unique index on
+// (owner, contact, field, value_a, value_b) backs it up, so retried or
+// concurrent writers cannot file it twice.
+const CONFLICT_EXISTS_SQL = `array::len((SELECT id FROM conflict
+       WHERE contact = $id AND field = $c.field AND value_a = $c.value_a AND value_b = $c.value_b)) > 0`
+
+const FILE_CONFLICT_SQL = `
+  IF !(${CONFLICT_EXISTS_SQL}) {
+    CREATE conflict CONTENT {
+      owner: $owner, contact: $id, field: $c.field,
+      value_a: $c.value_a, value_b: $c.value_b,
+      source_a: $c.source_a, source_b: $c.source_b
+    };
+  };`
+
+const CONFLICT_INDEX = 'conflict_unique_disagreement'
+
+// Files conflicts for a contact, skipping any that are already on record, so
+// repeating a sync never re-raises a disagreement. Returns how many this call
+// actually added, even when several writers race.
 export async function fileConflictsOnce(
   db: Db,
   owner: RecordId,
   key: string,
   entries: ConflictEntry[]
 ): Promise<number> {
-  if (entries.length === 0) return 0
   const id = recordId('contact', key)
-  const [existing] = await db
-    .query('SELECT field, value_a, value_b FROM conflict WHERE owner = $auth AND contact = $id', { id })
-    .collect<[{ field: string; value_a: string | null; value_b: string | null }[]]>()
-  const fresh = entries.filter(
-    (entry) =>
-      !existing.some(
-        (row) => row.field === entry.field && row.value_a === entry.value_a && row.value_b === entry.value_b
+  let added = 0
+  for (const entry of entries) {
+    try {
+      const results = await runTransaction(
+        db,
+        `BEGIN;
+         LET $c = $entry;
+         LET $made = IF ${CONFLICT_EXISTS_SQL} { [] } ELSE {
+           (CREATE conflict CONTENT {
+             owner: $owner, contact: $id, field: $c.field,
+             value_a: $c.value_a, value_b: $c.value_b,
+             source_a: $c.source_a, source_b: $c.source_b
+           } RETURN id)
+         };
+         RETURN array::len($made);
+         COMMIT;`,
+        { owner, id, entry }
       )
-  )
-  if (fresh.length === 0) return 0
-  await runTransaction(
-    db,
-    `BEGIN;
-     FOR $c IN $entries {
-       CREATE conflict CONTENT {
-         owner: $owner, contact: $id, field: $c.field,
-         value_a: $c.value_a, value_b: $c.value_b,
-         source_a: $c.source_a, source_b: $c.source_b
-       };
-     };
-     COMMIT;`,
-    { owner, id, entries: fresh }
-  )
-  return fresh.length
+      added += Number(lastDefined<number>(results) ?? 0)
+    } catch (error) {
+      // Lost a race to an identical filing: it is on record, which is the goal.
+      if (!isUniqueViolation(error, CONFLICT_INDEX)) throw error
+    }
+  }
+  return added
 }
 
 // SurrealDB reports a violated UNIQUE index as "Database index `x` already
-// contains ...".
-export function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Error && /Database index .* already contains/.test(error.message)
+// contains ...". Pass an index name to match only that index.
+export function isUniqueViolation(error: unknown, index?: string): boolean {
+  if (!(error instanceof Error)) return false
+  const match = /Database index `([^`]*)` already contains/.exec(error.message)
+  return match !== null && (index === undefined || match[1] === index)
+}
+
+// Another writer got to the provider identity first (or the contact lost its
+// link to a clash), so this merge was cancelled and nothing was written.
+export class LinkConflictError extends Error {
+  constructor() {
+    super('The provider link could not be attached to this contact.')
+    this.name = 'LinkConflictError'
+  }
 }
 
 export const MERGE_FIELDS = ['first_name', 'last_name', 'display_name', 'company', 'job_title'] as const
@@ -331,77 +375,97 @@ function blankSql(field: MergeField): string {
 //     (once: the same disagreement is not filed again, even after resolution);
 //   - is_financial_advisor is never touched; and
 //   - the provider link's platform_id is never replaced.
+//
+// `link` is null when the contact should keep the link it already has. When a
+// link is given, the merge is cancelled with LinkConflictError unless that link
+// really ends up attached to this contact: an INSERT ... ON DUPLICATE KEY
+// UPDATE would otherwise quietly touch a different contact's row if the
+// provider id was claimed in the meantime.
 export async function mergeImportedContact(
   db: Db,
   owner: RecordId,
   key: string,
   incoming: ImportedFields,
-  link: PlatformLinkInput,
+  link: PlatformLinkInput | null,
   sources: { local: string; provider: string }
 ): Promise<MergeOutcome> {
   const id = recordId('contact', key)
-  const [contacts, existingConflicts] = await db
-    .query(
-      `SELECT first_name, last_name, display_name, company, job_title FROM $id;
-       SELECT field, value_a, value_b FROM conflict WHERE owner = $auth AND contact = $id`,
-      { id }
-    )
-    .collect<[
-      Record<MergeField, string | null | undefined>[],
-      { field: string; value_a: string | null; value_b: string | null }[],
-    ]>()
-  const current = contacts[0]
-  if (!current) throw new Error('Matched contact no longer exists.')
 
-  const filled: MergeField[] = []
-  const conflicts: { field: MergeField; value_a: string; value_b: string }[] = []
-  for (const field of MERGE_FIELDS) {
-    const theirs = incoming[field]?.trim()
-    if (!theirs) continue
-    const mine = current[field]
-    if (isBlank(field, mine)) {
-      filled.push(field)
-    } else if (mine!.trim() !== theirs) {
-      const alreadyFiled = existingConflicts.some(
-        (row) => row.field === field && row.value_a === mine && row.value_b === theirs
+  for (let attempt = 1; ; attempt += 1) {
+    const [contacts, existingConflicts] = await db
+      .query(
+        `SELECT first_name, last_name, display_name, company, job_title FROM $id;
+         SELECT field, value_a, value_b FROM conflict WHERE owner = $auth AND contact = $id`,
+        { id }
       )
-      if (!alreadyFiled) conflicts.push({ field, value_a: mine!, value_b: theirs })
+      .collect<[
+        Record<MergeField, string | null | undefined>[],
+        { field: string; value_a: string | null; value_b: string | null }[],
+      ]>()
+    const current = contacts[0]
+    if (!current) throw new Error('Matched contact no longer exists.')
+
+    const filled: MergeField[] = []
+    const conflicts: { field: MergeField; value_a: string; value_b: string }[] = []
+    for (const field of MERGE_FIELDS) {
+      const theirs = incoming[field]?.trim()
+      if (!theirs) continue
+      const mine = current[field]
+      if (isBlank(field, mine)) {
+        filled.push(field)
+      } else if (mine!.trim() !== theirs) {
+        const alreadyFiled = existingConflicts.some(
+          (row) => row.field === field && row.value_a === mine && row.value_b === theirs
+        )
+        if (!alreadyFiled) conflicts.push({ field, value_a: mine!, value_b: theirs })
+      }
+    }
+
+    const vars: Record<string, unknown> = {
+      owner,
+      id,
+      link,
+      entries: conflicts.map((conflict) => ({
+        ...conflict,
+        source_a: sources.local,
+        source_b: sources.provider,
+      })),
+    }
+    const assignments = filled.map((field) => {
+      vars[`fill_${field}`] = incoming[field]!.trim()
+      // Re-checked inside the statement so a concurrent edit is never overwritten.
+      return `${field} = IF ${blankSql(field)} { $fill_${field} } ELSE { ${field} }`
+    })
+
+    try {
+      await runTransaction(
+        db,
+        `BEGIN;
+         ${assignments.length > 0 ? `UPDATE $id SET ${assignments.join(', ')};` : ''}
+         FOR $c IN $entries {${FILE_CONFLICT_SQL}};
+         ${
+           link
+             ? `INSERT INTO platform_link {
+                  owner: $owner, contact: $id, platform: $link.platform,
+                  platform_id: $link.platform_id, last_synced_at: time::now()
+                } ON DUPLICATE KEY UPDATE last_synced_at = $input.last_synced_at;
+                IF array::len((SELECT id FROM platform_link
+                     WHERE contact = $id AND platform = $link.platform
+                       AND platform_id = $link.platform_id)) = 0 {
+                  THROW "link_conflict";
+                };`
+             : ''
+         }
+         COMMIT;`,
+        vars
+      )
+      return { filled, conflicts: conflicts.map((conflict) => conflict.field) }
+    } catch (error) {
+      if (error instanceof Error && /link_conflict/.test(error.message)) throw new LinkConflictError()
+      // A concurrent writer filed one of our conflicts first; the whole merge
+      // rolled back, so look again and redo it without that one.
+      if (isUniqueViolation(error, CONFLICT_INDEX) && attempt < 3) continue
+      throw error
     }
   }
-
-  const vars: Record<string, unknown> = {
-    owner,
-    id,
-    link,
-    conflicts: conflicts.map((conflict) => ({
-      ...conflict,
-      source_a: sources.local,
-      source_b: sources.provider,
-    })),
-  }
-  const assignments = filled.map((field) => {
-    vars[`fill_${field}`] = incoming[field]!.trim()
-    // Re-checked inside the statement so a concurrent edit is never overwritten.
-    return `${field} = IF ${blankSql(field)} { $fill_${field} } ELSE { ${field} }`
-  })
-
-  await runTransaction(
-    db,
-    `BEGIN;
-       ${assignments.length > 0 ? `UPDATE $id SET ${assignments.join(', ')};` : ''}
-       FOR $c IN $conflicts {
-         CREATE conflict CONTENT {
-           owner: $owner, contact: $id, field: $c.field,
-           value_a: $c.value_a, value_b: $c.value_b,
-           source_a: $c.source_a, source_b: $c.source_b
-         };
-       };
-       INSERT INTO platform_link {
-         owner: $owner, contact: $id, platform: $link.platform,
-         platform_id: $link.platform_id, last_synced_at: time::now()
-       } ON DUPLICATE KEY UPDATE last_synced_at = $input.last_synced_at;
-       COMMIT;`,
-    vars
-  )
-  return { filled, conflicts: conflicts.map((conflict) => conflict.field) }
 }

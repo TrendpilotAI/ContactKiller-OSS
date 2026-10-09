@@ -18,7 +18,8 @@ interface SyncResult {
   conflicts?: number
   skipped?: string[]
   sharedEmailContacts?: number
-  duplicates?: number
+  filledFields?: number
+  skippedCount?: number
   total?: number
   error?: string
 }
@@ -237,8 +238,7 @@ function SettingsContent() {
               <div className={`p-3 rounded-lg ${importResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
                 {importResult.success ? (
                   <p className="text-green-800 text-sm">
-                    Imported {importResult.imported} of {importResult.total} contacts
-                    {importResult.duplicates ? ` (${importResult.duplicates} duplicates skipped)` : ''}
+                    {importResult.total} cards: {importResult.imported} new, {importResult.updated ?? 0} matched existing contacts (fields filled: {importResult.filledFields ?? 0}), {importResult.conflicts ?? 0} conflicts to review, {importResult.skippedCount ?? 0} skipped as ambiguous
                   </p>
                 ) : (
                   <p className="text-red-800 text-sm">{importResult.error}</p>

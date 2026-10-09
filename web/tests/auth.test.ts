@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { RecordId } from 'surrealdb'
-import { AuthError, MAX_PASSWORD_LENGTH, describeError, signIn, signUp } from '@/lib/db/auth'
+import {
+  AUTH_ERROR_MESSAGES,
+  AuthError,
+  MAX_PASSWORD_LENGTH,
+  SIGNUP_FAILED_MESSAGE,
+  describeError,
+  describeSignUpFailure,
+  signIn,
+  signUp,
+} from '@/lib/db/auth'
 import { connect } from '@/lib/db/client'
 import { isSignupEnabledInDatabase, setSignupEnabled } from '@/lib/db/settings'
 import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
@@ -78,6 +87,64 @@ describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
       .query("SELECT * FROM app_user WHERE email = 'racer@example.com'")
       .collect<[unknown[]]>()
     expect(rows).toHaveLength(1)
+  })
+
+  describe('sign-up does not reveal whether an address is registered', () => {
+    const failureFor = async (email: string, password = PASSWORD) => {
+      try {
+        await signUp(database.config, email, password)
+      } catch (error) {
+        return describeSignUpFailure(error, password)
+      }
+      throw new Error('sign-up unexpectedly succeeded')
+    }
+
+    test('every failure looks the same to the client: taken address, bad input, outage', async () => {
+      const taken = await failureFor('maya@example.com')
+      const badEmail = await failureFor('not-an-email')
+      const shortPassword = await failureFor('someone-new@example.com', 'short')
+      let outage: ReturnType<typeof describeSignUpFailure> | undefined
+      try {
+        await signUp({ ...database.config, url: 'http://127.0.0.1:9' }, 'x@example.com', PASSWORD)
+      } catch (error) {
+        outage = describeSignUpFailure(error, PASSWORD)
+      }
+
+      for (const failure of [taken, badEmail, shortPassword, outage!]) {
+        expect(failure.status).toBe(400)
+        expect(failure.body).toEqual({ error: SIGNUP_FAILED_MESSAGE, code: 'signup_failed' })
+      }
+      expect(SIGNUP_FAILED_MESSAGE).toBe("Couldn't create that account. If you already have one, sign in instead.")
+      expect(AUTH_ERROR_MESSAGES.email_taken).toBe(SIGNUP_FAILED_MESSAGE)
+    })
+
+    test('the real reason is kept for the server log, without the password', async () => {
+      const taken = await failureFor('maya@example.com')
+      expect(taken.reason).toBe('email_taken')
+      const outage = describeSignUpFailure(new Error(`could not reach host with "${PASSWORD}"`), PASSWORD)
+      expect(outage.reason).not.toContain(PASSWORD)
+      expect(outage.reason).toContain('[redacted]')
+    })
+
+    test('only "sign-up is disabled" is distinguishable, and it says nothing about accounts', () => {
+      const disabled = describeSignUpFailure(new AuthError('signup_disabled'), PASSWORD)
+      expect(disabled.status).toBe(403)
+      expect(disabled.body.code).toBe('signup_disabled')
+    })
+
+    test('a duplicate sign-up costs about as much as a real one', async () => {
+      const time = async (email: string) => {
+        const start = performance.now()
+        await signUp(database.config, email, PASSWORD).catch(() => undefined)
+        return performance.now() - start
+      }
+      await time('warmup-timing@example.com')
+      const fresh = await time('timing-new@example.com')
+      const duplicate = await time('timing-new@example.com')
+      // Both spend one argon2 hash; a duplicate that skipped it would return
+      // in a small fraction of the time.
+      expect(duplicate).toBeGreaterThan(fresh * 0.4)
+    })
   })
 
   test('failure logs never contain the password', () => {

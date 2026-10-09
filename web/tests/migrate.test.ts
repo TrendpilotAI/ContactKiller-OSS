@@ -233,7 +233,7 @@ describe.skipIf(!surrealAvailable)('0003 unique platform links', () => {
     const scratch = await mkdtemp(join(tmpdir(), 'ck-0003-'))
     try {
       const all = await readMigrations()
-      const before = all.filter((file) => !file.name.startsWith('0003') && !file.name.startsWith('0004'))
+      const before = all.filter((file) => file.name < '0003')
       for (const file of before) await writeFile(join(scratch, `${file.name}.surql`), file.sql)
       await migrate(isolated.admin, isolated.config, scratch)
 
@@ -270,6 +270,51 @@ describe.skipIf(!surrealAvailable)('0003 unique platform links', () => {
           .query("CREATE platform_link SET owner = $owner, contact = contact:three, platform = 'google', platform_id = 'people/dup'", { owner })
           .collect()
       ).rejects.toThrow()
+    } finally {
+      await isolated.stop()
+      await rm(scratch, { recursive: true, force: true })
+    }
+  })
+})
+
+describe.skipIf(!surrealAvailable)('0005 unique conflicts', () => {
+  test('refuses to run over duplicate conflicts, explains the fix, and succeeds once they are resolved', async () => {
+    const isolated = await startTestDatabase({ migrate: false })
+    const scratch = await mkdtemp(join(tmpdir(), 'ck-0005-'))
+    try {
+      const all = await readMigrations()
+      for (const file of all.filter((entry) => entry.name < '0005')) {
+        await writeFile(join(scratch, `${file.name}.surql`), file.sql)
+      }
+      await migrate(isolated.admin, isolated.config, scratch)
+
+      const [user] = await isolated.admin
+        .query("CREATE app_user SET email = 'conflicts@example.com', password_hash = 'x' RETURN id")
+        .collect<[{ id: unknown }[]]>()
+      const owner = user[0].id
+      await isolated.admin
+        .query(
+          `CREATE contact:one SET owner = $owner, display_name = 'One';
+           CREATE conflict:first SET owner = $owner, contact = contact:one, field = 'company', value_a = 'A', value_b = 'B';
+           CREATE conflict:second SET owner = $owner, contact = contact:one, field = 'company', value_a = 'A', value_b = 'B';`,
+          { owner }
+        )
+        .collect()
+
+      await expect(migrate(isolated.admin, isolated.config)).rejects.toThrow(/filed more than once/)
+      await expect(migrate(isolated.admin, isolated.config)).rejects.toThrow(/DELETE the others by id/)
+      const [recorded] = await isolated.admin.query("SELECT name FROM migration WHERE name CONTAINS '0005'").collect<[unknown[]]>()
+      expect(recorded).toEqual([])
+
+      await isolated.admin.query('DELETE conflict:second').collect()
+      const result = await migrate(isolated.admin, isolated.config)
+      expect(result.applied.some((name) => name.startsWith('0005'))).toBe(true)
+
+      await expect(
+        isolated.admin
+          .query("CREATE conflict SET owner = $owner, contact = contact:one, field = 'company', value_a = 'A', value_b = 'B'", { owner })
+          .collect()
+      ).rejects.toThrow(/conflict_unique_disagreement/)
     } finally {
       await isolated.stop()
       await rm(scratch, { recursive: true, force: true })

@@ -24,11 +24,17 @@ export class AuthError extends Error {
   }
 }
 
+// The one thing a client learns about a failed sign-up, whatever the cause
+// (taken address, invalid input, an outage): nothing that says whether an
+// address is registered.
+export const SIGNUP_FAILED_MESSAGE =
+  "Couldn't create that account. If you already have one, sign in instead."
+
 export const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
   invalid_credentials: 'Email or password is incorrect.',
   invalid_email: 'Enter a valid email address.',
   invalid_password_length: `Password must be ${MIN_PASSWORD_LENGTH} to ${MAX_PASSWORD_LENGTH} characters.`,
-  email_taken: 'Sign-up failed. That email may already be registered.',
+  email_taken: SIGNUP_FAILED_MESSAGE,
   signup_disabled: 'Sign-up is disabled on this instance.',
 }
 
@@ -119,4 +125,29 @@ export function describeError(error: unknown, secrets: unknown[] = []): string {
     if (typeof secret === 'string' && secret.length > 0) message = message.split(secret).join('[redacted]')
   }
   return `${name}: ${message.slice(0, 300)}`
+}
+
+export interface SignUpFailureResponse {
+  status: number
+  body: { error: string; code: string }
+  // For the server log only; never sent to the client and never contains the
+  // password.
+  reason: string
+}
+
+// Maps any sign-up failure to what the client may see. Only "sign-up is
+// disabled" is distinguishable, because it says nothing about any account.
+export function describeSignUpFailure(error: unknown, password: unknown): SignUpFailureResponse {
+  if (error instanceof AuthError && error.code === 'signup_disabled') {
+    return {
+      status: 403,
+      body: { error: AUTH_ERROR_MESSAGES.signup_disabled, code: 'signup_disabled' },
+      reason: 'signup_disabled',
+    }
+  }
+  return {
+    status: 400,
+    body: { error: SIGNUP_FAILED_MESSAGE, code: 'signup_failed' },
+    reason: error instanceof AuthError ? error.code : describeError(error, [password]),
+  }
 }

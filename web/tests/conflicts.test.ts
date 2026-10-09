@@ -1,5 +1,5 @@
 import { RecordId } from 'surrealdb'
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { createConflict, listUnresolvedConflicts, resolveConflict } from '@/lib/db/conflicts'
 import { createContact, getContact } from '@/lib/db/contacts'
 import { createTestUser, startTestDatabase, surrealAvailable, type TestDatabase, type TestUser } from './support/surreal'
@@ -27,6 +27,10 @@ describe.skipIf(!surrealAvailable)('conflict review', () => {
     contactId = await createContact(alice.db, alice.id, {
       fields: { first_name: 'Maya', last_name: 'Chen', display_name: 'Maya Chen', company: 'Original Co' },
     })
+  })
+  // The same disagreement can only be on record once, so each test starts clean.
+  beforeEach(async () => {
+    await database.admin.query('DELETE conflict').collect()
   })
   afterAll(async () => {
     await alice.db.close()
@@ -89,6 +93,33 @@ describe.skipIf(!surrealAvailable)('conflict review', () => {
       expect((await listUnresolvedConflicts(alice.db)).map((c) => c.id)).toContain(id)
     }
     expect((await getContact(alice.db, contactId))!.is_financial_advisor).toBe(false)
+  })
+
+  test('concurrent resolvers: exactly one applies, the rest see it already resolved', async () => {
+    for (let round = 0; round < 5; round += 1) {
+      await database.admin.query('DELETE conflict').collect()
+      const id = await newConflict('company')
+      const outcomes = await Promise.all(
+        (['a', 'b', 'a', 'b'] as const).map((choice) => resolveConflict(alice.db, id, choice))
+      )
+      expect(outcomes.filter((outcome) => outcome.status === 'resolved')).toHaveLength(1)
+      expect(outcomes.filter((outcome) => outcome.status === 'already_resolved')).toHaveLength(3)
+
+      // The contact holds the value of whichever resolver won, never a mix, and
+      // the conflict records that same value.
+      const company = (await getContact(alice.db, contactId))!.company
+      const [[row]] = await database.admin
+        .query('SELECT resolved_value FROM conflict WHERE id = $id', { id: new RecordId('conflict', id) })
+        .collect<[{ resolved_value: string }[]]>()
+      expect(['Acme Corp', 'Acme Holdings']).toContain(company as string)
+      expect(row.resolved_value).toBe(company as string)
+    }
+  })
+
+  test('a conflict that vanishes mid-resolve reports not_found, not already_resolved', async () => {
+    const id = await newConflict('company')
+    await database.admin.query('DELETE $id', { id: new RecordId('conflict', id) }).collect()
+    expect(await resolveConflict(alice.db, id, 'a')).toEqual({ status: 'not_found' })
   })
 
   test("another user cannot resolve someone else's conflict", async () => {

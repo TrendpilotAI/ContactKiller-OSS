@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { redirect } from 'next/navigation'
 import { InvalidRecordKeyError } from '@/lib/db/client'
-import { isChoice, resolveConflict } from '@/lib/db/conflicts'
+import { isChoice, resolveConflict, type ResolveOutcome } from '@/lib/db/conflicts'
 import { openSession, unauthorizedResponse } from '@/lib/db/session'
 import { MAX_FORM_BYTES, guardRequest, readLimitedFormData } from '@/lib/request-guard'
 
@@ -17,23 +17,22 @@ export async function POST(
   const session = await openSession()
   if (!session) return unauthorizedResponse()
 
-  const formData = await readLimitedFormData(request, MAX_FORM_BYTES)
-  const choice = formData?.get('choice')
-
-  if (!isChoice(choice)) {
-    await session.close()
-    return NextResponse.json(
-      { error: 'Invalid choice. Must be "a", "b", or "skip"' },
-      { status: 400 }
-    )
-  }
-
-  let outcome
+  // Everything that touches the session or the body stays inside try/finally so
+  // the connection is released on every path, including a failed body read.
+  let outcome: ResolveOutcome | { status: 'invalid_choice' }
   try {
-    outcome = await resolveConflict(session.db, id, choice)
-  } catch (error) {
-    if (!(error instanceof InvalidRecordKeyError)) throw error
-    outcome = { status: 'not_found' as const }
+    const formData = await readLimitedFormData(request, MAX_FORM_BYTES)
+    const choice = formData?.get('choice')
+    if (!isChoice(choice)) {
+      outcome = { status: 'invalid_choice' }
+    } else {
+      try {
+        outcome = await resolveConflict(session.db, id, choice)
+      } catch (error) {
+        if (!(error instanceof InvalidRecordKeyError)) throw error
+        outcome = { status: 'not_found' }
+      }
+    }
   } finally {
     await session.close()
   }
@@ -42,6 +41,11 @@ export async function POST(
     case 'resolved':
       // Redirect back to conflicts page
       redirect('/conflicts')
+    case 'invalid_choice':
+      return NextResponse.json(
+        { error: 'Invalid choice. Must be "a", "b", or "skip"' },
+        { status: 400 }
+      )
     case 'not_found':
       return NextResponse.json({ error: 'Conflict not found' }, { status: 404 })
     case 'already_resolved':

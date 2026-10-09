@@ -42,14 +42,20 @@ export async function POST(request: NextRequest): Promise<Response> {
 
       await finishSyncLog(db, syncLogId, {
         status: 'completed',
-        contactsProcessed: outcome.imported,
+        contactsProcessed: outcome.imported + outcome.updated,
+        conflictsFound: outcome.conflicts,
       })
 
       return NextResponse.json({
         success: true,
-        imported: outcome.imported,
-        duplicates: outcome.duplicates,
         total: outcome.total,
+        imported: outcome.imported,
+        updated: outcome.updated,
+        filledFields: outcome.filledFields,
+        conflicts: outcome.conflicts,
+        skipped: outcome.skipped.length > 0 ? outcome.skipped.slice(0, 50) : undefined,
+        skippedCount: outcome.skipped.length,
+        sharedEmailContacts: outcome.sharedEmailContacts > 0 ? outcome.sharedEmailContacts : undefined,
         errors: outcome.errors.length > 0 ? outcome.errors.slice(0, 10) : undefined,
       })
     } catch (err) {

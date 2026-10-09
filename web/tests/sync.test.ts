@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { people_v1 } from 'googleapis'
 import { RecordId } from 'surrealdb'
-import { createContact, getContact, listContacts } from '@/lib/db/contacts'
+import { createContact, fileConflictsOnce, findContactByLink, getContact, listContacts } from '@/lib/db/contacts'
 import { FA_EMAIL_DOMAINS } from '@/lib/fa-detection'
 import { finishSyncLog, startSyncLog } from '@/lib/db/sync-logs'
 import { normalizePhone, reconcileGoogleContacts } from '@/lib/sync/google'
@@ -27,6 +27,33 @@ const advisor: Person = {
 const vcard = (body: string) =>
   `BEGIN:VCARD\r\nVERSION:3.0\r\nX-CONTACTKILLER-SYNTHETIC:TRUE\r\n${body}\r\nEND:VCARD\r\n`
 
+// Wraps a connection so the identity-index read returns what it saw but then
+// waits: the caller decides who to link while the world moves underneath it.
+function withHeldIdentityIndex(db: TestUser['db']) {
+  let release: () => void = () => undefined
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const stale = new Proxy(db, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (property !== 'query') return typeof value === 'function' ? value.bind(target) : value
+      return (sql: string, vars?: Record<string, unknown>) => {
+        const query = target.query(sql, vars)
+        if (!sql.includes('FROM platform_link WHERE owner')) return query
+        return {
+          collect: async (...args: number[]) => {
+            const rows = await query.collect(...args)
+            await held
+            return rows
+          },
+        }
+      }
+    },
+  }) as typeof db
+  return { stale, release }
+}
+
 describe.skipIf(!surrealAvailable)('provider imports', () => {
   let database: TestDatabase
   let alice: TestUser
@@ -43,23 +70,23 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
     await database.stop()
   })
 
+  const seedLocal = async (
+    user: TestUser,
+    fields: Partial<Record<'first_name' | 'last_name' | 'company' | 'job_title', string>> & {
+      display_name: string
+      is_financial_advisor?: boolean
+    },
+    channels: { emails?: string[]; phones?: string[]; googleId?: string } = {}
+  ) =>
+    createContact(user.db, user.id, {
+      fields,
+      emails: (channels.emails ?? []).map((value) => ({ value })),
+      phones: (channels.phones ?? []).map((value) => ({ value })),
+      links: channels.googleId ? [{ platform: 'google', platform_id: channels.googleId }] : [],
+    })
+
   describe('Google reconciliation', () => {
     const fresh = async (label: string) => createTestUser(database, label)
-
-    const seedLocal = async (
-      user: TestUser,
-      fields: Partial<Record<'first_name' | 'last_name' | 'company' | 'job_title', string>> & {
-        display_name: string
-        is_financial_advisor?: boolean
-      },
-      channels: { emails?: string[]; phones?: string[]; googleId?: string } = {}
-    ) =>
-      createContact(user.db, user.id, {
-        fields,
-        emails: (channels.emails ?? []).map((value) => ({ value })),
-        phones: (channels.phones ?? []).map((value) => ({ value })),
-        links: channels.googleId ? [{ platform: 'google', platform_id: channels.googleId }] : [],
-      })
 
     const conflictsFor = async (user: TestUser) => {
       const [rows] = await user.db
@@ -70,7 +97,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
 
     test('imports new contacts with emails, phones, links, and advisor detection', async () => {
       const result = await reconcileGoogleContacts(alice.db, alice.id, [maya, advisor])
-      expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+      expect(result).toMatchObject({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
 
       const contacts = await listContacts(alice.db)
       const imported = contacts.find((c) => c.first_name === 'Maya')!
@@ -93,9 +120,9 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
     test('is idempotent: re-running changes nothing and files no duplicate conflicts', async () => {
       const changed: Person = { ...maya, organizations: [{ name: 'Renamed Studio', title: 'Lead' }] }
       const first = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
-      expect(first).toEqual({ imported: 0, updated: 2, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
+      expect(first).toMatchObject({ imported: 0, updated: 2, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
       const second = await reconcileGoogleContacts(alice.db, alice.id, [changed, advisor])
-      expect(second).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+      expect(second).toMatchObject({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
 
       expect(await listContacts(alice.db)).toHaveLength(2)
       expect(await conflictsFor(alice)).toHaveLength(2)
@@ -120,7 +147,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
             organizations: [{ name: 'Google Studio', title: 'Designer' }],
           },
         ])
-        expect(result).toEqual({ imported: 0, updated: 1, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
+        expect(result).toMatchObject({ imported: 0, updated: 1, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 0 })
 
         const contact = (await getContact(user.db, id))!
         expect(contact).toMatchObject({
@@ -186,7 +213,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           { resourceName: 'people/x2', names: [{ displayName: 'P' }], phoneNumbers: [{ value: '+1 202 555 0143' }] },
           { resourceName: 'people/x3', names: [{ displayName: 'I' }], emailAddresses: [{ value: 'changed@example.com' }] },
         ])
-        expect(result).toEqual({ imported: 0, updated: 3, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+        expect(result).toMatchObject({ imported: 0, updated: 3, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
         expect((await getContact(user.db, byEmail))!.platform_links[0].platform_id).toBe('people/x1')
         expect((await getContact(user.db, byPhone))!.platform_links[0].platform_id).toBe('people/x2')
         expect((await getContact(user.db, byId))!.platform_links[0].platform_id).toBe('people/x3')
@@ -254,7 +281,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
             { resourceName: 'people/s2', names: [{ displayName: 'Second' }], emailAddresses: [{ value: 'SHARED@example.com' }], organizations: [{ name: 'Two' }] },
           ]
           const result = await reconcileGoogleContacts(user.db, user.id, people)
-          expect(result).toEqual({ imported: 2, updated: 0, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 2 })
+          expect(result).toMatchObject({ imported: 2, updated: 0, conflicts: 2, errors: [], skipped: [], sharedEmailContacts: 2 })
 
           const local = (await getContact(user.db, id))!
           expect(local).toMatchObject({ display_name: 'Local Owner', company: 'Mine' })
@@ -293,7 +320,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           ]
           expect(await reconcileGoogleContacts(user.db, user.id, people)).toMatchObject({ imported: 2, conflicts: 2, sharedEmailContacts: 2 })
           const again = await reconcileGoogleContacts(user.db, user.id, people)
-          expect(again).toEqual({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+          expect(again).toMatchObject({ imported: 0, updated: 2, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
           expect(await listContacts(user.db)).toHaveLength(2)
           expect(await conflictsFor(user)).toHaveLength(2)
         } finally {
@@ -430,28 +457,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           const people = roster(5)
           // The second sync reads the (still empty) identity index, then waits
           // until the first sync has finished before it starts writing.
-          let release: () => void = () => undefined
-          const firstDone = new Promise<void>((resolve) => {
-            release = resolve
-          })
-          const stale = new Proxy(user.db, {
-            get(target, property) {
-              const value = Reflect.get(target, property, target)
-              if (property !== 'query') return typeof value === 'function' ? value.bind(target) : value
-              return (sql: string, vars?: Record<string, unknown>) => {
-                const query = target.query(sql, vars)
-                if (!sql.includes('FROM platform_link WHERE owner')) return query
-                return {
-                  collect: async (...args: number[]) => {
-                    const rows = await query.collect(...args)
-                    await firstDone
-                    return rows
-                  },
-                }
-              }
-            },
-          }) as typeof user.db
-
+          const { stale, release } = withHeldIdentityIndex(user.db)
           const losing = reconcileGoogleContacts(stale, user.id, people)
           await Bun.sleep(100)
           const winner = await reconcileGoogleContacts(user.db, user.id, people)
@@ -464,6 +470,95 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           expect((await linksFor(user)).sort()).toEqual(people.map((p) => p.resourceName!).sort())
         } finally {
           await user.db.close()
+        }
+      })
+
+      test('a provider id claimed mid-sync cancels the merge instead of touching the other contact', async () => {
+        const user = await fresh('claimed')
+        try {
+          const target = await seedLocal(user, { display_name: 'Target' }, { emails: ['target@example.com'] })
+          const { stale, release } = withHeldIdentityIndex(user.db)
+
+          const merging = reconcileGoogleContacts(stale, user.id, [
+            {
+              resourceName: 'people/contested',
+              names: [{ displayName: 'Target', givenName: 'Tara' }],
+              emailAddresses: [{ value: 'target@example.com' }],
+              organizations: [{ name: 'Would Be Filled' }],
+            },
+          ])
+          await Bun.sleep(100)
+          // Meanwhile another contact takes that Google id.
+          const rival = await seedLocal(user, { display_name: 'Rival' }, { googleId: 'people/contested' })
+          const [before] = await user.db.query('SELECT last_synced_at FROM platform_link').collect<[{ last_synced_at: unknown }[]]>()
+          release()
+          const result = await merging
+
+          expect(result).toMatchObject({ imported: 0, updated: 0, errors: [] })
+          expect(result.skipped).toEqual([expect.stringContaining('linked to another contact while this import was running')])
+
+          // Cancelled as a whole: no fills, no link on the target, and the
+          // rival's link row was not touched by the clashing upsert.
+          expect(await getContact(user.db, target)).toMatchObject({ company: null, first_name: null, platform_links: [] })
+          const [after] = await user.db.query('SELECT last_synced_at FROM platform_link').collect<[{ last_synced_at: unknown }[]]>()
+          expect(after).toEqual(before)
+          expect((await getContact(user.db, rival))!.platform_links.map((l) => l.platform_id)).toEqual(['people/contested'])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('conflicts are filed once: a unique index backs the check, and racing writers file one row', async () => {
+        const user = await fresh('conflictonce')
+        try {
+          const id = await seedLocal(user, { display_name: 'Pat', company: 'Local Co' }, { emails: ['pat-once@example.com'] })
+          const entry = { field: 'shared_email', value_a: 'pat-once@example.com', value_b: 'Also on other Google contacts', source_a: 'google', source_b: 'google' }
+
+          await expect(
+            user.db
+              .query('CREATE conflict CONTENT { owner: $owner, contact: $contact, field: "x", value_a: "a", value_b: "b" }', {
+                owner: user.id,
+                contact: new RecordId('contact', id),
+              })
+              .collect()
+          ).resolves.toBeDefined()
+          await expect(
+            user.db
+              .query('CREATE conflict CONTENT { owner: $owner, contact: $contact, field: "x", value_a: "a", value_b: "b" }', {
+                owner: user.id,
+                contact: new RecordId('contact', id),
+              })
+              .collect()
+          ).rejects.toThrow(/conflict_unique_disagreement/)
+
+          const added = await Promise.all(Array.from({ length: 6 }, () => fileConflictsOnce(user.db, user.id, id, [entry])))
+          expect(added.reduce((sum, n) => sum + n, 0)).toBe(1)
+          const [rows] = await user.db.query("SELECT id FROM conflict WHERE field = 'shared_email'").collect<[unknown[]]>()
+          expect(rows).toHaveLength(1)
+
+          // Merges racing each other file the same disagreement once too.
+          const person: Person = { resourceName: 'people/pat', names: [{ displayName: 'Pat' }], emailAddresses: [{ value: 'pat-once@example.com' }], organizations: [{ name: 'Remote Co' }] }
+          const runs = await Promise.all(Array.from({ length: 4 }, () => reconcileGoogleContacts(user.db, user.id, [person])))
+          for (const run of runs) expect(run.errors).toEqual([])
+          const [company] = await user.db.query("SELECT id FROM conflict WHERE field = 'company'").collect<[unknown[]]>()
+          expect(company).toHaveLength(1)
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a link for one provider id resolves to its contact with a single lookup, per user', async () => {
+        const user = await fresh('lookup')
+        const other = await fresh('lookup-other')
+        try {
+          const id = await seedLocal(user, { display_name: 'Findable' }, { googleId: 'people/find' })
+          expect(await findContactByLink(user.db, 'google', 'people/find')).toBe(id)
+          expect(await findContactByLink(user.db, 'icloud', 'people/find')).toBeNull()
+          expect(await findContactByLink(user.db, 'google', 'people/missing')).toBeNull()
+          expect(await findContactByLink(other.db, 'google', 'people/find')).toBeNull()
+        } finally {
+          await user.db.close()
+          await other.db.close()
         }
       })
 
@@ -501,7 +596,7 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           { names: [{ displayName: 'No Resource Name' }] },
           { resourceName: 'people/c4002', names: [{ displayName: 'Fine Two' }] },
         ])
-        expect(result).toEqual({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
+        expect(result).toMatchObject({ imported: 2, updated: 0, conflicts: 0, errors: [], skipped: [], sharedEmailContacts: 0 })
         expect(await listContacts(carol.db)).toHaveLength(2)
       } finally {
         await carol.db.close()
@@ -510,15 +605,25 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
   })
 
   describe('vCard import', () => {
+    const fresh = async (label: string) => createTestUser(database, label)
+    const card = (body: string) => vcard(body)
+    const withUid = (uid: string, body: string) => vcard(`UID:${uid}\r\n${body}`)
+    const linksOf = async (user: TestUser) => {
+      const [rows] = await user.db
+        .query("SELECT platform_id FROM platform_link WHERE platform = 'icloud'")
+        .collect<[{ platform_id: string }[]]>()
+      return rows.map((row) => row.platform_id)
+    }
+
     test('imports cards, extracting names, emails, phones, and organization', async () => {
-      const dave = await createTestUser(database, 'dave')
+      const dave = await fresh('dave')
       try {
         const outcome = await importVcf(
           dave.db,
           dave.id,
-          vcard('FN:Lena Park\r\nN:Park;Lena;;;\r\nEMAIL;TYPE=WORK:lena@example.com\r\nTEL;TYPE=CELL:+1 202 555 0150\r\nORG:Example Lab\r\nTITLE:Engineer')
+          card('FN:Lena Park\r\nN:Park;Lena;;;\r\nEMAIL;TYPE=WORK:lena@example.com\r\nTEL;TYPE=CELL:+1 202 555 0150\r\nORG:Example Lab\r\nTITLE:Engineer')
         )
-        expect(outcome).toEqual({ imported: 1, duplicates: 0, errors: [], total: 1 })
+        expect(outcome).toMatchObject({ imported: 1, updated: 0, errors: [], skipped: [], total: 1 })
 
         const [contact] = await listContacts(dave.db)
         expect(contact).toMatchObject({
@@ -536,34 +641,225 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
       }
     })
 
-    test('re-importing the same file skips duplicates by email, including within one file', async () => {
-      const erin = await createTestUser(database, 'erin')
-      try {
-        const file =
-          vcard('FN:Ivo One\r\nEMAIL:ivo@example.com') +
-          vcard('FN:Ivo Again\r\nEMAIL:IVO@example.com') +
-          vcard('FN:No Email Person\r\nTEL:+1 202 555 0151')
-        const first = await importVcf(erin.db, erin.id, file)
-        expect(first).toMatchObject({ imported: 2, duplicates: 1, total: 3 })
-        const second = await importVcf(erin.db, erin.id, file)
-        expect(second).toMatchObject({ imported: 1, duplicates: 2, total: 3 })
-        expect(await listContacts(erin.db)).toHaveLength(3)
-      } finally {
-        await erin.db.close()
-      }
-    })
-
     test('imports the repository synthetic fixture (LF line endings)', async () => {
-      const frank = await createTestUser(database, 'frank')
+      const frank = await fresh('frank')
       try {
         const fixture = await Bun.file(new URL('../../examples/synthetic/maya-chen.vcf', import.meta.url)).text()
         const outcome = await importVcf(frank.db, frank.id, fixture)
-        expect(outcome).toMatchObject({ imported: 1, duplicates: 0, errors: [] })
+        expect(outcome).toMatchObject({ imported: 1, errors: [], skipped: [] })
         const [contact] = await listContacts(frank.db)
         expect(contact).toMatchObject({ first_name: 'Maya', last_name: 'Chen', display_name: 'Maya Chen' })
         expect(contact.emails[0].email).toBe('maya.chen@example.com')
+        // The fixture's UID is the link's platform id.
+        expect(contact.platform_links[0].platform_id).toBe('synthetic-icloud-maya-chen-001')
       } finally {
         await frank.db.close()
+      }
+    })
+
+    test('re-importing a file with UIDs updates in place and creates nothing new', async () => {
+      const user = await fresh('uid')
+      try {
+        const file =
+          withUid('uid-ivo', 'FN:Ivo One\r\nEMAIL:ivo@example.com') +
+          withUid('uid-ada', 'FN:Ada Two\r\nTEL:+1 202 555 0151')
+        const first = await importVcf(user.db, user.id, file)
+        expect(first).toMatchObject({ imported: 2, updated: 0, skipped: [], conflicts: 0 })
+        const again = await importVcf(user.db, user.id, file)
+        expect(again).toMatchObject({ imported: 0, updated: 2, skipped: [], conflicts: 0, errors: [] })
+        expect(await listContacts(user.db)).toHaveLength(2)
+        expect((await linksOf(user)).sort()).toEqual(['uid-ada', 'uid-ivo'])
+
+        // The UID still finds the contact when the card's email has changed.
+        const moved = withUid('uid-ivo', 'FN:Ivo One\r\nEMAIL:ivo.new@example.com')
+        expect(await importVcf(user.db, user.id, moved)).toMatchObject({ imported: 0, updated: 1 })
+        expect(await listContacts(user.db)).toHaveLength(2)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a phone-only card without a UID is recognised by its exact phone on re-import', async () => {
+      const user = await fresh('phoneonly')
+      try {
+        const file = card('FN:Pat Phone\r\nTEL:+1 202 555 0152')
+        expect(await importVcf(user.db, user.id, file)).toMatchObject({ imported: 1, updated: 0 })
+        const again = await importVcf(user.db, user.id, file)
+        expect(again).toMatchObject({ imported: 0, updated: 1, skipped: [], errors: [] })
+        expect(await listContacts(user.db)).toHaveLength(1)
+        expect(await linksOf(user)).toHaveLength(1)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a phone that is not a valid number is never a match key, and names never are', async () => {
+      const user = await fresh('weakkeys')
+      try {
+        await seedLocal(user, { display_name: 'Same Name' }, { phones: ['555-0143'] })
+        const outcome = await importVcf(
+          user.db,
+          user.id,
+          card('FN:Same Name\r\nTEL:555-0143') + card('FN:Same Name\r\nN:Name;Same;;;')
+        )
+        expect(outcome).toMatchObject({ imported: 2, updated: 0, skipped: [] })
+        expect(await listContacts(user.db)).toHaveLength(3)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a match fills empty fields, files conflicts for differences, and never overwrites or reclassifies', async () => {
+      const user = await fresh('icloudmerge')
+      try {
+        const id = await seedLocal(
+          user,
+          { display_name: 'Maya C.', first_name: 'Maya', company: 'Local Studio', is_financial_advisor: true },
+          { emails: ['maya@example.com'] }
+        )
+        const outcome = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-maya', 'FN:Maya Chen\r\nN:Chen;Maya;;;\r\nEMAIL:MAYA@example.com\r\nORG:Apple Studio\r\nTITLE:Designer')
+        )
+        expect(outcome).toMatchObject({ imported: 0, updated: 1, filledFields: 2, conflicts: 2, skipped: [], errors: [] })
+
+        const contact = (await getContact(user.db, id))!
+        expect(contact).toMatchObject({
+          first_name: 'Maya',
+          last_name: 'Chen',
+          job_title: 'Designer',
+          display_name: 'Maya C.',
+          company: 'Local Studio',
+          is_financial_advisor: true,
+        })
+        expect(contact.platform_links.map((l) => l.platform_id)).toEqual(['uid-maya'])
+        const [conflicts] = await user.db
+          .query('SELECT field, value_a, value_b, source_a, source_b FROM conflict ORDER BY field')
+          .collect<[Record<string, unknown>[]]>()
+        expect(conflicts).toEqual([
+          { field: 'company', value_a: 'Local Studio', value_b: 'Apple Studio', source_a: 'local', source_b: 'icloud' },
+          { field: 'display_name', value_a: 'Maya C.', value_b: 'Maya Chen', source_a: 'local', source_b: 'icloud' },
+        ])
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a family email shared by two cards is not a match key: each card is its own contact, flagged for review', async () => {
+      const user = await fresh('family')
+      try {
+        const local = await seedLocal(user, { display_name: 'Household', company: 'Home' }, { emails: ['family@example.com'] })
+        const file =
+          withUid('uid-mom', 'FN:Mom\r\nEMAIL:family@example.com') +
+          withUid('uid-kid', 'FN:Kid\r\nEMAIL:FAMILY@example.com')
+        const outcome = await importVcf(user.db, user.id, file)
+        expect(outcome).toMatchObject({ imported: 2, updated: 0, skipped: [], sharedEmailContacts: 2, conflicts: 2 })
+
+        const contacts = await listContacts(user.db)
+        expect(contacts).toHaveLength(3)
+        const mom = contacts.find((c) => c.display_name === 'Mom')!
+        const kid = contacts.find((c) => c.display_name === 'Kid')!
+        expect(mom.id).not.toBe(kid.id)
+        expect((await getContact(user.db, local))!).toMatchObject({ company: 'Home', platform_links: [] })
+
+        const [filed] = await user.db
+          .query("SELECT contact, source_a FROM conflict WHERE field = 'shared_email'")
+          .collect<[{ contact: { id: unknown }; source_a: string }[]]>()
+        expect(new Set(filed.map((row) => String(row.contact.id)))).toEqual(new Set([mom.id, kid.id]))
+        expect(filed.every((row) => row.source_a === 'icloud')).toBe(true)
+
+        // Same file again: found by UID, nothing duplicated or re-filed.
+        const again = await importVcf(user.db, user.id, file)
+        expect(again).toMatchObject({ imported: 0, updated: 2, conflicts: 0 })
+        expect(await listContacts(user.db)).toHaveLength(3)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a card whose identifiers match two different contacts is skipped and reported', async () => {
+      const user = await fresh('twomatches')
+      try {
+        const a = await seedLocal(user, { display_name: 'Contact A' }, { emails: ['a@example.com'] })
+        const b = await seedLocal(user, { display_name: 'Contact B' }, { phones: ['(202) 555-0143'] })
+        const outcome = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-both', 'FN:Both\r\nEMAIL:a@example.com\r\nTEL:+1 202 555 0143')
+        )
+        expect(outcome).toMatchObject({ imported: 0, updated: 0, errors: [] })
+        expect(outcome.skipped).toEqual([expect.stringContaining('more than one existing contact')])
+        expect((await getContact(user.db, a))!.platform_links).toEqual([])
+        expect((await getContact(user.db, b))!.platform_links).toEqual([])
+        expect(await listContacts(user.db)).toHaveLength(2)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a contact already linked to a different iCloud UID is not relinked', async () => {
+      const user = await fresh('relinkicloud')
+      try {
+        const id = await seedLocal(user, { display_name: 'Linked' }, { emails: ['linked@example.com'] })
+        await user.db
+          .query('CREATE platform_link CONTENT { owner: $owner, contact: $contact, platform: "icloud", platform_id: "uid-original" }', {
+            owner: user.id,
+            contact: new RecordId('contact', id),
+          })
+          .collect()
+        const outcome = await importVcf(user.db, user.id, withUid('uid-other', 'FN:Linked\r\nEMAIL:linked@example.com'))
+        expect(outcome).toMatchObject({ imported: 0, updated: 0 })
+        expect(outcome.skipped).toEqual([expect.stringContaining('already linked to a different iCloud contact')])
+        expect((await getContact(user.db, id))!.platform_links.map((l) => l.platform_id)).toEqual(['uid-original'])
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('two cards in one file claiming the same contact are both skipped; a repeated UID is reported', async () => {
+      const user = await fresh('claimsicloud')
+      try {
+        const id = await seedLocal(user, { display_name: 'Contested' }, { emails: ['contested@example.com'], phones: ['(202) 555-0143'] })
+        const claims = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-1', 'FN:By Email\r\nEMAIL:contested@example.com') + withUid('uid-2', 'FN:By Phone\r\nTEL:+1 202 555 0143')
+        )
+        expect(claims).toMatchObject({ imported: 0, updated: 0 })
+        expect(claims.skipped).toHaveLength(2)
+        expect((await getContact(user.db, id))!.platform_links).toEqual([])
+
+        const repeated = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-rep', 'FN:First Copy\r\nEMAIL:rep1@example.com') + withUid('uid-rep', 'FN:Second Copy\r\nEMAIL:rep2@example.com')
+        )
+        expect(repeated).toMatchObject({ imported: 1 })
+        expect(repeated.skipped).toEqual([expect.stringContaining('same id appears more than once')])
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('every card is accounted for: created, matched, or reported as skipped or errored', async () => {
+      const user = await fresh('accounted')
+      try {
+        await seedLocal(user, { display_name: 'Existing' }, { emails: ['existing@example.com'] })
+        await seedLocal(user, { display_name: 'Dup One' }, { emails: ['dup@example.com'] })
+        await seedLocal(user, { display_name: 'Dup Two' }, { emails: ['dup@example.com'] })
+        const file =
+          withUid('u1', 'FN:New Person\r\nEMAIL:new@example.com') +
+          withUid('u2', 'FN:Existing\r\nEMAIL:existing@example.com') +
+          withUid('u3', 'FN:Ambiguous\r\nEMAIL:dup@example.com') +
+          withUid('u4', 'FN:Nothing But A Name')
+        const outcome = await importVcf(user.db, user.id, file)
+        expect(outcome.total).toBe(4)
+        expect(outcome.imported + outcome.updated + outcome.skipped.length + outcome.errors.length).toBe(4)
+        expect(outcome).toMatchObject({ imported: 2, updated: 1 })
+        expect(outcome.skipped).toHaveLength(1)
+      } finally {
+        await user.db.close()
       }
     })
 

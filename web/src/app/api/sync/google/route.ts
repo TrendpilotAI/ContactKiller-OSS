@@ -59,6 +59,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         success: true,
         imported: result.imported,
         updated: result.updated,
+        filledFields: result.filledFields,
         conflicts: result.conflicts,
         skipped: result.skipped.length > 0 ? result.skipped : undefined,
         sharedEmailContacts: result.sharedEmailContacts > 0 ? result.sharedEmailContacts : undefined,
