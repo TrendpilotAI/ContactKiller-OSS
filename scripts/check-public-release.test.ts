@@ -66,10 +66,17 @@ describe.each(modes)("private-value patterns in %s", (_mode, scan) => {
     ["factory task id with a digit, no dashes", j("G~SC~K1")],
     ["factory task id with underscores", j("G~S_C~K_2")],
     ["factory task id with spaces", j("g~s c~k 3")],
+    ["factory task id with a hash sign", j("G~S-C~K #12")],
+    ["factory task id with dots", j("G~S.C~K.12")],
+    ["factory task id with slashes", j("G~S/C~K-12")],
+    ["factory task id with doubled separators", j("G~S--C~K-12")],
+    ["factory task id after an underscore", j("task_G~S-C~K-12")],
     ["full cloud-agent id", j("b~c-3074cc92-bcd6-5e94-b006-1e1ce339f88e")],
     ["cloud-agent id short form", j("b~c-3074cc92")],
     ["cloud-agent id with underscore", j("b~c_3074cc92")],
     ["cloud-agent id with a longer hex run", j("b~c-3074cc92bcd6")],
+    ["cloud-agent id after an underscore", j("agent_b~c-3074cc92")],
+    ["cloud-agent id after a slash", j("agents/b~c_3074cc92")],
     ["originating-agent name", j("gro~k-sh~ip")],
     ["originating-agent name, no separator", j("gro~ksh~ip")],
     ["originating-agent name, space", j("Gro~k Sh~ip")],
@@ -93,7 +100,6 @@ describe.each(modes)("private-value patterns in %s", (_mode, scan) => {
     ["a ticket id after 'logs'", "logs ck-335"],
     ["a word ending in bc followed by hex", "abc-12345678"],
     ["a short bc- suffix", "bc-12"],
-    ["upper-case BC with a space and digits", "BC 12345678"],
     ["grok as an ordinary word", "grokking the codebase, then a ship date"],
     ["a short bearer value", "Authorization: Bearer abc"],
     ["bearer as an ordinary word", "Bearer authentication headers"],
@@ -111,6 +117,19 @@ describe.each(modes)("private-value patterns in %s", (_mode, scan) => {
 });
 
 describe("scope: ticket data is stricter than release files", () => {
+  test("upper-case BC with a space and digits is not flagged in a release file", () => {
+    const release = scanReleaseFile("note: BC 12345678\n");
+    expect(release.stderr).toBe("");
+    expect(release.status).toBe(0);
+  });
+
+  test("the bc id pattern is case-insensitive only in ticket data", () => {
+    for (const value of [j("B~C 3074CC92"), j("B~c-3074cc92"), j("agent_B~C-3074CC92")]) {
+      expect(scanExport(`note: ${value}\n`).status).toBe(1);
+      expect(scanReleaseFile(`note: ${value}\n`).status).toBe(0);
+    }
+  });
+
   const onlyInTicketData: Array<[string, string]> = [
     ["a workspace-root path (Dockerfile style)", j("WORKDIR /work~space/app")],
     ["an agent data path", j("agent~-data/store")],

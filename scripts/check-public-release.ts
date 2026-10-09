@@ -252,12 +252,13 @@ function scanTextContent(path: string, text: string): void {
 // Written so that this file's own source cannot match any pattern below.
 type PrivatePattern = [RegExp, string];
 
-// Applied to every tracked file and to exports.
+// Applied to every tracked file and to exports. The lookbehind (not \b) lets a
+// match start right after "_" as well as after punctuation, but not inside a word.
 const privateIdentifierPatterns: PrivatePattern[] = [
-  [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
-  [/\bbc[-_][0-9a-fA-F]{8,}/u, "private cloud-agent id (short form)"],
-  [new RegExp("\\bGS-C" + "K-", "iu"), "private factory task id"],
-  [new RegExp("\\bGS[-_ ]?C" + "K[-_ ]?\\d", "iu"), "private factory task id"],
+  [/(?<![A-Za-z0-9])bc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![A-Za-z0-9])/iu, "private cloud-agent id"],
+  [/(?<![A-Za-z0-9])bc[\W_][0-9a-fA-F]{8,}/u, "private cloud-agent id (short form)"],
+  [new RegExp("(?<![A-Za-z0-9])GS-C" + "K-", "iu"), "private factory task id"],
+  [new RegExp("(?<![A-Za-z0-9])GS[\\W_]*C" + "K[\\W_]*\\d", "iu"), "private factory task id"],
   [/grok[\W_]?shi[p]/iu, "private originating-agent name"],
   [new RegExp("/home/bo" + "x/", "u"), "private machine path"],
   [new RegExp("GOCSP" + "X-[A-Za-z0-9_-]{20,}", "u"), "Google OAuth client secret"],
@@ -267,6 +268,7 @@ const privateIdentifierPatterns: PrivatePattern[] = [
 // Applied only to ticket data (--scan-export): paths that are ordinary in
 // source files such as Dockerfiles, and any bearer-looking value.
 const exportOnlyPatterns: PrivatePattern[] = [
+  [/(?<![A-Za-z0-9])bc[\W_][0-9a-f]{8,}/iu, "private cloud-agent id (any case)"],
   [/\/workspac[e]\//iu, "private machine path"],
   [/agent-dat[a]\//iu, "private machine path"],
   [/Beare[r]\s+[A-Za-z0-9._~+/-]{20,}/u, "bearer token"],
