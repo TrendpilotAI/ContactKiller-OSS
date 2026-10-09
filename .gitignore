@@ -175,7 +175,7 @@ research/**/04-reviews/**/pages/
 .local/
 .dev/
 dev-data/
-**/supabase/.temp/
+web/compose.env
 
 # TypeScript
 *.tsbuildinfo

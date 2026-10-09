@@ -18,12 +18,14 @@ is licensed under the Apache License, Version 2.0, and its upstream notice state
 
 ## SurrealDB
 
-SurrealDB is an optional database target under active development. The SurrealDB
-server is not part of ContactKiller and is distributed under the upstream Business
-Source License 1.1 terms. Review those terms before offering SurrealDB as a hosted
-service or redistributing it.
+SurrealDB is the database used by the web prototype. The SurrealDB server is not
+part of ContactKiller and is distributed under the upstream Business Source
+License 1.1 terms. Review those terms before offering SurrealDB as a hosted
+service or redistributing it. The `surrealdb` JavaScript SDK is a separate
+Apache-2.0 dependency.
 
-- License: <https://github.com/surrealdb/surrealdb/blob/main/LICENSE>
+- Server license: <https://github.com/surrealdb/surrealdb/blob/main/LICENSE>
+- SDK license: <https://github.com/surrealdb/surrealdb.js/blob/main/LICENSE>
 
 ## FalkorDB
 
@@ -37,7 +39,7 @@ source-available terms including the Server Side Public License and Elastic Lice
 ## No relicensing of dependencies
 
 The ContactKiller Apache-2.0 license applies only to original ContactKiller work.
-It does not relicense ActiveGraph, SurrealDB, FalkorDB, Supabase, Google APIs, or
+It does not relicense ActiveGraph, SurrealDB, FalkorDB, Google APIs, or
 any package listed in a dependency manifest.
 
 ## Contributor Covenant

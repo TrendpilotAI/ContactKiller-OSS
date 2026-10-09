@@ -46,7 +46,10 @@ export default function Home() {
           </div>
 
           <div className="mt-8 text-sm text-gray-500">
-            Last sync: Never | Schedule: Manual only
+            Last sync: Never | Schedule: Manual only |{' '}
+            <Link href="/login" className="text-blue-600 hover:text-blue-700">
+              Account
+            </Link>
           </div>
         </div>
       </div>

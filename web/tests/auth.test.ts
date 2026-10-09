@@ -1,0 +1,304 @@
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { RecordId } from 'surrealdb'
+import {
+  AUTH_ERROR_MESSAGES,
+  AuthError,
+  MAX_PASSWORD_LENGTH,
+  SIGNUP_FAILED_MESSAGE,
+  describeError,
+  describeSignUpFailure,
+  signIn,
+  signUp,
+} from '@/lib/db/auth'
+import { connect } from '@/lib/db/client'
+import { isSignupEnabledInDatabase, setSignupEnabled } from '@/lib/db/settings'
+import { startTestDatabase, surrealAvailable, type TestDatabase } from './support/surreal'
+
+const PASSWORD = 'correct-horse-battery-1'
+
+async function codeOf(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise
+  } catch (error) {
+    if (error instanceof AuthError) return error.code
+    throw error
+  }
+  return 'no error'
+}
+
+describe.skipIf(!surrealAvailable)('SurrealDB record auth', () => {
+  let database: TestDatabase
+
+  beforeAll(async () => {
+    database = await startTestDatabase()
+  })
+  afterAll(async () => {
+    await database.stop()
+  })
+
+  test('sign-up returns a session token that resolves to an app_user', async () => {
+    const token = await signUp(database.config, 'Maya@Example.com', PASSWORD)
+    const db = await connect(database.config, { kind: 'token', token })
+    try {
+      const [auth] = await db.query('RETURN $auth').collect<[RecordId]>()
+      expect(auth.table.name).toBe('app_user')
+    } finally {
+      await db.close()
+    }
+  })
+
+  test('passwords are stored as argon2 hashes and emails are normalized', async () => {
+    const [rows] = await database.admin
+      .query('SELECT email, password_hash FROM app_user')
+      .collect<[{ email: string; password_hash: string }[]]>()
+    expect(rows[0].email).toBe('maya@example.com')
+    expect(rows[0].password_hash.startsWith('$argon2')).toBe(true)
+    expect(rows[0].password_hash).not.toContain(PASSWORD)
+  })
+
+  test('sign-in is case-insensitive on email and rejects wrong passwords', async () => {
+    expect(await signIn(database.config, 'MAYA@example.com', PASSWORD)).toBeTruthy()
+    expect(await codeOf(signIn(database.config, 'maya@example.com', 'wrong-password-123'))).toBe('invalid_credentials')
+    expect(await codeOf(signIn(database.config, 'nobody@example.com', PASSWORD))).toBe('invalid_credentials')
+    expect(await codeOf(signIn(database.config, { $ne: '' }, PASSWORD))).toBe('invalid_credentials')
+  })
+
+  test('sign-up validates email and password and refuses duplicates', async () => {
+    expect(await codeOf(signUp(database.config, 'not-an-email', PASSWORD))).toBe('invalid_email')
+    expect(await codeOf(signUp(database.config, 'short@example.com', 'short'))).toBe('invalid_password_length')
+    expect(await codeOf(signUp(database.config, 'maya@example.com', PASSWORD))).toBe('email_taken')
+    expect(await codeOf(signUp(database.config, 'MAYA@example.com', PASSWORD))).toBe('email_taken')
+  })
+
+  test('only a duplicate address is reported as email_taken; other failures are not', async () => {
+    await expect(signUp({ ...database.config, url: 'http://127.0.0.1:9' }, 'nobody@example.com', PASSWORD)).rejects.not.toBeInstanceOf(AuthError)
+
+    // Two sign-ups racing for one new address: exactly one account is created,
+    // and the loser is either told the address is taken or gets a generic
+    // (retryable) failure, never a different account's data.
+    const settled = await Promise.allSettled([
+      signUp(database.config, 'racer@example.com', PASSWORD),
+      signUp(database.config, 'racer@example.com', PASSWORD),
+    ])
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const loser = settled.find((result) => result.status === 'rejected') as PromiseRejectedResult
+    if (loser.reason instanceof AuthError) expect(loser.reason.code).toBe('email_taken')
+    const [rows] = await database.admin
+      .query("SELECT * FROM app_user WHERE email = 'racer@example.com'")
+      .collect<[unknown[]]>()
+    expect(rows).toHaveLength(1)
+  })
+
+  describe('sign-up does not reveal whether an address is registered', () => {
+    const failureFor = async (email: string, password = PASSWORD) => {
+      try {
+        await signUp(database.config, email, password)
+      } catch (error) {
+        return describeSignUpFailure(error, password)
+      }
+      throw new Error('sign-up unexpectedly succeeded')
+    }
+
+    test('every failure looks the same to the client: taken address, bad input, outage', async () => {
+      const taken = await failureFor('maya@example.com')
+      const badEmail = await failureFor('not-an-email')
+      const shortPassword = await failureFor('someone-new@example.com', 'short')
+      let outage: ReturnType<typeof describeSignUpFailure> | undefined
+      try {
+        await signUp({ ...database.config, url: 'http://127.0.0.1:9' }, 'x@example.com', PASSWORD)
+      } catch (error) {
+        outage = describeSignUpFailure(error, PASSWORD)
+      }
+
+      for (const failure of [taken, badEmail, shortPassword, outage!]) {
+        expect(failure.status).toBe(400)
+        expect(failure.body).toEqual({ error: SIGNUP_FAILED_MESSAGE, code: 'signup_failed' })
+      }
+      expect(SIGNUP_FAILED_MESSAGE).toBe("Couldn't create that account. If you already have one, sign in instead.")
+      expect(AUTH_ERROR_MESSAGES.email_taken).toBe(SIGNUP_FAILED_MESSAGE)
+    })
+
+    test('the real reason is kept for the server log, without the password', async () => {
+      const taken = await failureFor('maya@example.com')
+      expect(taken.reason).toBe('email_taken')
+      const outage = describeSignUpFailure(new Error(`could not reach host with "${PASSWORD}"`), PASSWORD)
+      expect(outage.reason).not.toContain(PASSWORD)
+      expect(outage.reason).toContain('[redacted]')
+    })
+
+    test('only "sign-up is disabled" is distinguishable, and it says nothing about accounts', () => {
+      const disabled = describeSignUpFailure(new AuthError('signup_disabled'), PASSWORD)
+      expect(disabled.status).toBe(403)
+      expect(disabled.body.code).toBe('signup_disabled')
+    })
+
+    test('a duplicate sign-up costs about as much as a real one', async () => {
+      const time = async (email: string) => {
+        const start = performance.now()
+        await signUp(database.config, email, PASSWORD).catch(() => undefined)
+        return performance.now() - start
+      }
+      await time('warmup-timing@example.com')
+      const fresh = await time('timing-new@example.com')
+      const duplicate = await time('timing-new@example.com')
+      // Both spend one argon2 hash; a duplicate that skipped it would return
+      // in a small fraction of the time.
+      expect(duplicate).toBeGreaterThan(fresh * 0.4)
+    })
+  })
+
+  test('failure logs never contain the password', () => {
+    const error = new Error(`signup failed for variables {"password":"${PASSWORD}"} at host`)
+    const described = describeError(error, [PASSWORD, undefined, ''])
+    expect(described).not.toContain(PASSWORD)
+    expect(described).toContain('[redacted]')
+    expect(describeError('plain string failure')).toContain('plain string failure')
+  })
+
+  test('the database itself enforces the password and email policy', async () => {
+    const db = await connect(database.config, { kind: 'anonymous' })
+    try {
+      await expect(
+        db.signup({
+          namespace: database.config.namespace,
+          database: database.config.database,
+          access: 'account',
+          variables: { email: 'weak@example.com', password: 'short' },
+        })
+      ).rejects.toThrow('invalid_password_length')
+      await expect(
+        db.signup({
+          namespace: database.config.namespace,
+          database: database.config.database,
+          access: 'account',
+          variables: { email: 'bad', password: PASSWORD },
+        })
+      ).rejects.toThrow('invalid_email')
+    } finally {
+      await db.close()
+    }
+  })
+
+  test('record users cannot read accounts or password hashes', async () => {
+    const token = await signIn(database.config, 'maya@example.com', PASSWORD)
+    const db = await connect(database.config, { kind: 'token', token })
+    try {
+      const [rows] = await db.query('SELECT * FROM app_user').collect<[unknown[]]>()
+      expect(rows).toEqual([])
+    } finally {
+      await db.close()
+    }
+  })
+
+  test('garbage and tampered tokens are rejected', async () => {
+    await expect(connect(database.config, { kind: 'token', token: 'garbage' })).rejects.toThrow()
+    const token = await signIn(database.config, 'maya@example.com', PASSWORD)
+    const [header, payload, signature] = token.split('.')
+    const forged = [header, payload, `${signature.slice(0, -3)}AAA`].join('.')
+    await expect(connect(database.config, { kind: 'token', token: forged })).rejects.toThrow()
+  })
+
+  test('an anonymous connection cannot query at all', async () => {
+    const db = await connect(database.config, { kind: 'anonymous' })
+    try {
+      for (const table of ['contact', 'email', 'oauth_token', 'conflict', 'app_user']) {
+        await expect(db.query(`SELECT * FROM ${table}`).collect()).rejects.toThrow('Anonymous access not allowed')
+      }
+    } finally {
+      await db.close()
+    }
+  })
+
+  describe('database-side sign-up gate', () => {
+    const directSignup = async (email: string) => {
+      const db = await connect(database.config, { kind: 'anonymous' })
+      try {
+        return await db.signup({
+          namespace: database.config.namespace,
+          database: database.config.database,
+          access: 'account',
+          variables: { email, password: PASSWORD },
+        })
+      } finally {
+        await db.close()
+      }
+    }
+
+    test('a direct SurrealDB sign-up fails while sign-up is disabled, and creates no user', async () => {
+      await setSignupEnabled(database.admin, false)
+      try {
+        await expect(directSignup('direct@example.com')).rejects.toThrow('signup_disabled')
+        expect(await codeOf(signUp(database.config, 'viaapp@example.com', PASSWORD))).toBe('signup_disabled')
+        const [rows] = await database.admin
+          .query("SELECT * FROM app_user WHERE email IN ['direct@example.com', 'viaapp@example.com']")
+          .collect<[unknown[]]>()
+        expect(rows).toEqual([])
+      } finally {
+        await setSignupEnabled(database.admin, true)
+      }
+    })
+
+    test('sign-up works again once the setting is enabled', async () => {
+      expect(await directSignup('enabled@example.com')).toHaveProperty('access')
+    })
+
+    test('a fresh migration leaves sign-up disabled and fails closed without the setting', async () => {
+      const fresh = await startTestDatabase({ signup: false })
+      try {
+        expect(await codeOf(signUp(fresh.config, 'fresh@example.com', PASSWORD))).toBe('signup_disabled')
+        await fresh.admin.query('DELETE setting').collect()
+        expect(await codeOf(signUp(fresh.config, 'fresh@example.com', PASSWORD))).toBe('signup_disabled')
+      } finally {
+        await fresh.stop()
+      }
+    })
+
+    test('record users cannot read or change the setting', async () => {
+      const token = await signIn(database.config, 'maya@example.com', PASSWORD)
+      const db = await connect(database.config, { kind: 'token', token })
+      try {
+        const [rows] = await db.query('SELECT * FROM setting').collect<[unknown[]]>()
+        expect(rows).toEqual([])
+        await db.query('UPSERT setting:signup SET enabled = false').collect()
+        expect(await isSignupEnabledInDatabase(database.admin)).toBe(true)
+      } finally {
+        await db.close()
+      }
+    })
+  })
+
+  describe('sign-in hardening', () => {
+    test('over-long passwords are rejected without reaching argon2', async () => {
+      const long = 'x'.repeat(MAX_PASSWORD_LENGTH + 1)
+      expect(await codeOf(signIn(database.config, 'maya@example.com', long))).toBe('invalid_credentials')
+
+      const db = await connect(database.config, { kind: 'anonymous' })
+      try {
+        await expect(
+          db.signin({
+            namespace: database.config.namespace,
+            database: database.config.database,
+            access: 'account',
+            variables: { email: 'maya@example.com', password: long },
+          })
+        ).rejects.toThrow('invalid_credentials')
+      } finally {
+        await db.close()
+      }
+    })
+
+    test('unknown and known emails fail the same way, with comparable work', async () => {
+      const time = async (email: string) => {
+        const start = performance.now()
+        expect(await codeOf(signIn(database.config, email, 'wrong-password-123'))).toBe('invalid_credentials')
+        return performance.now() - start
+      }
+      await time('maya@example.com')
+      const known = await time('maya@example.com')
+      const unknown = await time('nobody-at-all@example.com')
+      // Both paths hash with argon2, so an unknown email must not return in a
+      // small fraction of the known-email time.
+      expect(unknown).toBeGreaterThan(known * 0.4)
+    })
+  })
+})

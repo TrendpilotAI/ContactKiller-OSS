@@ -1,32 +1,35 @@
-import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { MAX_BULK_IDS, bulkSetFinancialAdvisor } from '@/lib/db/contacts'
+import { isRecordKey } from '@/lib/db/client'
+import { withSession } from '@/lib/db/session'
+import { guardRequest, readLimitedJson } from '@/lib/request-guard'
 
 // POST /api/contacts/bulk-tag - Tag multiple contacts
 export async function POST(request: NextRequest) {
-  const supabase = await createClient()
-  const body = await request.json()
+  const blocked = guardRequest(request, { json: true })
+  if (blocked) return blocked
 
-  const { ids, is_financial_advisor } = body
+  return withSession(async ({ db }) => {
+    const json = await readLimitedJson(request)
+    if (!json.ok) return json.response
+    const body = json.value as { ids?: unknown; is_financial_advisor?: unknown } | null
+    const ids: unknown = body?.ids
+    const isFinancialAdvisor: unknown = body?.is_financial_advisor
 
-  if (!ids || !Array.isArray(ids) || ids.length === 0) {
-    return NextResponse.json(
-      { error: 'ids array is required' },
-      { status: 400 }
-    )
-  }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return NextResponse.json({ error: 'ids array is required' }, { status: 400 })
+    }
+    if (ids.length > MAX_BULK_IDS || !ids.every(isRecordKey)) {
+      return NextResponse.json(
+        { error: `ids must be at most ${MAX_BULK_IDS} contact ids` },
+        { status: 400 }
+      )
+    }
+    if (typeof isFinancialAdvisor !== 'boolean') {
+      return NextResponse.json({ error: 'is_financial_advisor must be a boolean' }, { status: 400 })
+    }
 
-  const { data, error } = await supabase
-    .from('contacts')
-    .update({ is_financial_advisor })
-    .in('id', ids)
-    .select()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json({
-    updated: data.length,
-    contacts: data,
+    const updated = await bulkSetFinancialAdvisor(db, ids, isFinancialAdvisor)
+    return NextResponse.json({ updated: updated.length, ids: updated })
   })
 }

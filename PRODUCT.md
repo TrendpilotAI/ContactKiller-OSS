@@ -28,7 +28,7 @@ The product is evaluated against fragmented iCloud and Google address books, CRM
 ## Capabilities and Constraints
 
 - The current prototype includes a Next.js contact/conflict interface, Google Contacts import routes, iCloud vCard import, provider links with ContactKiller tenant ownership, a Mesh read-only snapshot path, and an experimental ActiveGraph domain pack. It does not yet preserve separate personal and work accounts from the same provider.
-- SurrealDB is a documented persistence target; no adapter ships in the sanitized default branch and it is not the production authority.
+- SurrealDB stores the web prototype's accounts, mutable contacts, conflicts, and encrypted provider tokens. The provenance and replay model it is meant to hold is a documented target, and it is not yet a production authority.
 - FalkorDB is a community exploration track for disposable graph projections, not a current runtime dependency or second source of truth.
 - Provider-write safety, tenant isolation, complete adapter coverage, restoration proof, and production cutover remain incomplete.
 - ContactKiller is experimental software and must not be presented as a production-safe bulk deletion tool.
