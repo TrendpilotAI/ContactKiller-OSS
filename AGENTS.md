@@ -225,7 +225,15 @@ with `dolt_ignore`, so they are never committed and never published.
   `events`, `ignored_schema_migrations`, `leases`, `local_metadata`,
   `repo_mtimes`, `wisps` and every `wisp_*` table. (`bd history <id> --events`
   reads `events`, which is why it is local to a clone.)
-- *Views, no data:* `blocked_issues`, `ready_issues`.
+- *Views, no data:* `blocked_issues`, `ready_issues`. Their SQL (and any trigger
+  SQL) lives in `dolt_schemas`, which is dumped for scanning, and every change to
+  it in history is dumped too; a history query on it that errors fails the run.
+
+Table names are read from Dolt as JSON and must be plain identifiers
+(`[a-z_]+`, so no spaces, newlines or upper case) that exactly equal an entry
+of the known list; they are never split on whitespace or substring-matched.
+The `dolt_ignore` check compares every row, pattern and flag, so an added
+un-ignore override fails as well.
 
 **Dolt history.** `bd dolt push` publishes every commit, so the scan also reads
 history with the `dolt` CLI. In published mode (and in `--local` mode) it takes
@@ -233,7 +241,8 @@ the trusted baseline in `scripts/beads-history-baseline.txt` (a Dolt commit; it
 must be an ancestor of HEAD) and dumps every change made by the commits after
 it: row-level diffs (`dolt_diff_<table>`, added, modified and removed rows) of
 every touched table, `dolt_history_config`, the commit messages and the net
-`dolt diff`. Those dumps go through the scanners and gitleaks, and a forbidden
+`dolt diff` (a failing `dolt diff` fails the run). Those dumps, the net diff
+included, go through the scanners and gitleaks, and a forbidden
 config key (`export.exclude_owner*`, `directory.label*`, `dolt.auto-push`, any
 case) fails the run even if a later commit unset it. A touched table outside the
 published set fails as well, including one created and dropped inside the range.
@@ -241,8 +250,15 @@ published set fails as well, including one created and dropped inside the range.
 runs `dolt fetch` for the remote, takes the remote's head (or all history when
 the remote has none), refuses a head that is not an ancestor of local HEAD, and
 scans everything after it before pushing. History at or before the baseline was
-reviewed by hand and is out of scope; only the owner moves the baseline (it is
-CODEOWNERS-protected).
+reviewed by hand and is out of scope; only the owner should move the baseline.
+The baseline file, the guard scripts, the workflows, `.beads/config.yaml`,
+`.beads/metadata.json`, `.beads/interactions.jsonl` and the release manifest are
+listed in `.github/CODEOWNERS`. Whether a change to them actually needs the
+owner's approval depends on branch protection (required code-owner reviews,
+required status checks such as "Beads export scan", and whether admins are
+exempt), which the repository owner controls and which is not changed by anything
+in this repository. At the time of writing those protections are not enabled, so
+treat CODEOWNERS as a statement of who should review, not as an enforced gate.
 
 **Not covered.** History at or before the baseline commit, the `dolt_ignore`d
 tables (never pushed), and anything bd keeps outside the Dolt database. The

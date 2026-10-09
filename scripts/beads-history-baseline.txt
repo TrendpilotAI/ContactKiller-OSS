@@ -1,7 +1,9 @@
 # Trusted Dolt commit for the tracker history. Every commit up to and including
 # it was reviewed; the Beads export scan inspects every commit made after it
 # (see scripts/beads-guard.sh history). Only the repository owner moves this
-# forward, after reviewing the commits it would newly trust (see CODEOWNERS).
+# forward, after reviewing the commits it would newly trust. It is listed in
+# .github/CODEOWNERS; enforcement depends on branch protection that the
+# repository owner controls.
 #
 # 990v4tcs... is the tip published as refs/dolt/data c9c787e, which includes four
 # reviewed config-table commits (a key set and unset again) on top of the
