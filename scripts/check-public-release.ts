@@ -252,14 +252,20 @@ function scanTextContent(path: string, text: string): void {
 // Written so that this file's own source cannot match any pattern below.
 const privateIdentifierPatterns: Array<[RegExp, string]> = [
   [/\bbc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/iu, "private cloud-agent id"],
-  [/\bbc-(?=[0-9a-f]*[0-9])[0-9a-f]{8}\b/iu, "private cloud-agent id (short form)"],
+  [/\bbc[\W_][0-9a-f]{8,}/iu, "private cloud-agent id (short form)"],
   [new RegExp("GS-C" + "K-", "iu"), "private factory task id"],
-  [/grok[\s_-]?shi[p]/iu, "private originating-agent name"],
+  [new RegExp("GS[\\W_]*C" + "K[\\W_]*\\d", "iu"), "private factory task id"],
+  [/grok[\W_]?shi[p]/iu, "private originating-agent name"],
+  [new RegExp("/home/bo" + "x/", "iu"), "private machine path"],
+  [/\/workspac[e]\//iu, "private machine path"],
+  [/agent-dat[a]\//iu, "private machine path"],
+  [new RegExp("GOCSP" + "X-[A-Za-z0-9_-]{20,}", "u"), "Google OAuth client secret"],
+  [/Beare[r]\s+[A-Za-z0-9._~+/-]{20,}/u, "bearer token"],
 ];
 
 function scanPrivateIdentifiers(path: string, text: string): void {
   for (const [pattern, label] of privateIdentifierPatterns) {
-    if (pattern.test(text)) add(path, `${label} detected; public tickets must use opaque aliases`);
+    if (pattern.test(text)) add(path, `${label} detected; public files and tickets must use opaque aliases and carry no private values`);
   }
 }
 

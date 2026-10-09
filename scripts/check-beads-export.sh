@@ -23,8 +23,11 @@
 # Requires: bd, jq, bun, gitleaks, git. Any missing tool, bootstrap/export
 # error, empty export while tickets are expected, or scanner error fails the run.
 #
-# Also fails when `bd provenance log` returns anything for a ticket: this repo
-# does not use the native provenance table (AGENTS.md).
+# Also fails when an export owner exclusion is configured or the export does not
+# hold exactly the tickets `bd list` shows (scripts/beads-guard.sh), when a
+# scanned file carries a gitleaks allow comment, and when `bd provenance log`
+# returns anything for a ticket: this repo does not use the native provenance
+# table (AGENTS.md).
 #
 # Not covered: the scan sees only current rows of `bd export --all` and the
 # per-ticket `bd provenance log`. It does not see the kv, config and events
@@ -89,7 +92,9 @@ fi
 scan_dir="$(mktemp -d)"
 trap 'rm -rf "$scan_dir"' EXIT
 export_file="$scan_dir/beads-export.jsonl"
+scripts/beads-guard.sh config
 bd export --all -o "$export_file"
+scripts/beads-guard.sh listing "$export_file"
 
 if [ -n "${BEADS_AUDIT_BASELINE:-}" ]; then
   [ -f "$BEADS_AUDIT_BASELINE" ] || { echo "audit baseline not found: $BEADS_AUDIT_BASELINE" >&2; exit 1; }
@@ -146,6 +151,7 @@ fi
 if compgen -G "$provenance_dir/*.json" >/dev/null; then
   bun scripts/check-public-release.ts --scan-export "$provenance_dir"/*.json
 fi
+scripts/beads-guard.sh no-allow "$scan_dir"
 gitleaks dir "$scan_dir" --redact --no-banner
 
 if [ "$provenance_rows" -gt 0 ]; then

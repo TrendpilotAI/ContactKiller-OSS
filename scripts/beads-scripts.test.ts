@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -160,9 +160,76 @@ describe("check-audit-append-only.sh", () => {
 });
 
 describe("bd-push.sh", () => {
-  test.each(["--force", "--force=true", "--force-with-lease", "-f", "-yf", "-fy"])("refuses %s before doing anything", (flag) => {
-    const result = spawnSync(bdPush, [flag], { encoding: "utf8" });
+  test.each([
+    ["--force"],
+    ["--force=true"],
+    ["--force-with-lease"],
+    ["-f"],
+    ["-yf"],
+    ["-fy"],
+    ["-y"],
+    ["-C", "/tmp"],
+    ["--directory", "/tmp"],
+    ["--directory=/tmp"],
+    ["--db", "/tmp/x"],
+    ["--readonly"],
+    ["--sandbox"],
+    ["--dolt-auto-commit", "off"],
+    ["--dolt-auto-commit=off"],
+    ["--no-adopt"],
+    ["--remote"],
+    ["--remote", "other"],
+    ["--remote=origin"],
+    ["--remote", "origin", "--force"],
+    ["origin"],
+  ])("rejects %s before doing anything", (...args) => {
+    const result = spawnSync(bdPush, args, { encoding: "utf8" });
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain("refusing to force-push");
+    expect(result.stderr).toContain("unsupported arguments");
+  });
+
+  /** A throwaway repo with stub scans and a recording `bd`, so nothing real is pushed. */
+  function stubbed(dir: string): { env: NodeJS.ProcessEnv; calls: string } {
+    mkdirSync(join(dir, "scripts"));
+    mkdirSync(join(dir, "bin"));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "scripts/bd-push.sh"), readFileSync(bdPush));
+    for (const stub of ["check-beads-export.sh", "beads-guard.sh"]) {
+      writeFileSync(join(dir, "scripts", stub), '#!/usr/bin/env bash\necho "STUB $(basename "$0") $*" >> "$CALLS"\n');
+    }
+    writeFileSync(join(dir, "bin/bd"), '#!/usr/bin/env bash\necho "bd $*" >> "$CALLS"\n');
+    for (const file of ["scripts/bd-push.sh", "scripts/check-beads-export.sh", "scripts/beads-guard.sh", "bin/bd"]) {
+      chmodSync(join(dir, file), 0o755);
+    }
+    mkdirSync(join(dir, ".beads"));
+    const calls = join(dir, "calls.log");
+    return { env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, CALLS: calls }, calls };
+  }
+
+  test("with no arguments it scans, re-checks, then pushes with --no-adopt", () => {
+    withTempDir((dir) => {
+      const { env, calls } = stubbed(dir);
+      const result = spawnSync(join(dir, "scripts/bd-push.sh"), [], { cwd: dir, env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      const log = readFileSync(calls, "utf8").trim().split("\n");
+      expect(log[0]).toBe("STUB check-beads-export.sh --local");
+      expect(log).toContain("STUB beads-guard.sh config");
+      expect(log.at(-1)).toBe("bd dolt push --no-adopt");
+    });
+  });
+
+  test("--remote origin is passed through, and nothing is pushed if a scan fails", () => {
+    withTempDir((dir) => {
+      const { env, calls } = stubbed(dir);
+      const ok = spawnSync(join(dir, "scripts/bd-push.sh"), ["--remote", "origin"], { cwd: dir, env, encoding: "utf8" });
+      expect(ok.status).toBe(0);
+      expect(readFileSync(calls, "utf8").trim().split("\n").at(-1)).toBe("bd dolt push --no-adopt --remote origin");
+
+      rmSync(calls);
+      writeFileSync(join(dir, "scripts/check-beads-export.sh"), "#!/usr/bin/env bash\nexit 1\n");
+      const failed = spawnSync(join(dir, "scripts/bd-push.sh"), [], { cwd: dir, env, encoding: "utf8" });
+      expect(failed.status).not.toBe(0);
+      expect(() => readFileSync(calls, "utf8")).toThrow();
+    });
   });
 });
