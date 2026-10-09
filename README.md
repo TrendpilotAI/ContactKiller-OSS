@@ -42,7 +42,7 @@ The repository is intentionally candid about maturity:
 | --- | --- | --- |
 | Contact explorer and CRUD API | Implemented prototype | SurrealDB-backed interface and routes; not production-proven. |
 | Google Contacts | Experimental | Read-only OAuth scope and one-way import with exact-identifier matching; access tokens refresh from the stored refresh token (not yet verified against live Google); write-back is not implemented. |
-| iCloud | Experimental | Manual vCard import; no CardDAV sync. |
+| iCloud | Experimental | Manual vCard import under the same exact-match rules as Google (UID, email, valid phone); no CardDAV sync. |
 | Mesh | Research connector | Bounded, read-only snapshot path into owner-only local storage. |
 | ActiveGraph | Experimental foundation | Typed reconciliation objects, approval routing, replay, and runtime tests. Not the live production authority. |
 | SurrealDB | Implemented prototype persistence | The web prototype stores users, contacts, conflicts, sync logs, and encrypted OAuth tokens in SurrealDB with owner-scoped permissions. The provenance, observation, and replay model remains a documented target. |
@@ -76,7 +76,7 @@ Apple / Google / CRM / Mesh / messaging evidence
                          bounded provider mutation
 ```
 
-The public tree does not implement this flow end to end. Today, Google import can update mutable contact fields and iCloud import can skip a duplicate rather than retain a separate source observation. The diagram is an architecture contract and acceptance target, not a production-readiness claim.
+The public tree does not implement this flow end to end. Today, Google and iCloud imports fill empty fields on an exactly matched contact and file conflicts for differences, rather than retaining a separate source observation. The diagram is an architecture contract and acceptance target, not a production-readiness claim.
 
 The target architecture separates three responsibilities:
 
