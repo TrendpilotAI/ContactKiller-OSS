@@ -112,10 +112,16 @@ export class InvalidRecordKeyError extends Error {
   }
 }
 
+// Parses with the SDK's DateTime, which keeps nanoseconds. Going through a JS
+// Date would round to milliseconds, and a cursor rounded that way skips rows
+// whose timestamps fall in the same millisecond. Null for anything that is not
+// a date.
 export function parseDateTime(value: string): DateTime | null {
-  const time = new Date(value)
-  if (Number.isNaN(time.getTime())) return null
-  return new DateTime(time)
+  try {
+    return new DateTime(value)
+  } catch {
+    return null
+  }
 }
 
 // Converts SDK value classes into JSON-safe values. Record links collapse to

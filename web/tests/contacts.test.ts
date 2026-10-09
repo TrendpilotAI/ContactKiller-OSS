@@ -10,7 +10,7 @@ import {
   listContacts,
   updateContact,
 } from '@/lib/db/contacts'
-import { InvalidRecordKeyError } from '@/lib/db/client'
+import { InvalidRecordKeyError, parseDateTime } from '@/lib/db/client'
 import { createTestUser, startTestDatabase, surrealAvailable, type TestDatabase, type TestUser } from './support/surreal'
 
 async function rowCount(database: TestDatabase, table: string): Promise<number> {
@@ -140,6 +140,52 @@ describe.skipIf(!surrealAvailable)('contacts persistence', () => {
       expect(await countContacts(searchUser.db)).toEqual({ total: 5, financialAdvisors: 3 })
     } finally {
       await searchUser.db.close()
+    }
+  })
+
+  test('cursor pagination keeps nanosecond precision: rows sharing a millisecond are not skipped', async () => {
+    const pager = await createTestUser(database, 'pager')
+    try {
+      // One query, so the timestamps differ by nanoseconds and most share a ms.
+      await pager.db
+        .query('FOR $i IN 0..12 { CREATE contact SET owner = $owner, display_name = string::concat("row-", <string>$i) }', {
+          owner: pager.id,
+        })
+        .collect()
+
+      const all = await listContacts(pager.db, { limit: 100 })
+      expect(all).toHaveLength(12)
+      const millis = all.map((c) => c.updated_at.slice(0, 23))
+      const largestBucket = Math.max(...[...new Set(millis)].map((ms) => millis.filter((m) => m === ms).length))
+      expect(largestBucket).toBeGreaterThanOrEqual(3)
+
+      const pages: string[][] = []
+      let cursor: string | null = null
+      for (let guard = 0; guard < 20; guard += 1) {
+        const page: Awaited<ReturnType<typeof listContacts>> = await listContacts(pager.db, {
+          limit: 3,
+          cursor: cursor ?? undefined,
+        })
+        if (page.length === 0) break
+        pages.push(page.map((c) => c.display_name))
+        cursor = page.length === 3 ? page[page.length - 1].updated_at : null
+        if (!cursor) break
+      }
+
+      expect(pages.flat()).toHaveLength(12)
+      expect(new Set(pages.flat()).size).toBe(12)
+      expect(pages.flat()).toEqual(all.map((c) => c.display_name))
+    } finally {
+      await pager.db.close()
+    }
+  })
+
+  test('a cursor keeps the precision it was issued with, and anything that is not a date is null', () => {
+    const issued = '2026-10-09T14:28:09.635843977Z'
+    expect(parseDateTime(issued)?.toISOString()).toBe(issued)
+    expect(parseDateTime('2026-10-09T14:28:09.635Z')?.toISOString()).toBe('2026-10-09T14:28:09.635Z')
+    for (const bad of ['yesterday-ish', '', 'null', '2026-13-45T99:99:99Z']) {
+      expect(parseDateTime(bad)).toBeNull()
     }
   })
 
