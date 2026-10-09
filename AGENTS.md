@@ -236,7 +236,9 @@ The `dolt_ignore` check compares every row, pattern and flag, so an added
 un-ignore override fails as well.
 
 **Dolt history.** `bd dolt push` publishes every commit, so the scan also reads
-history with the `dolt` CLI. In published mode (and in `--local` mode) it takes
+history with the `dolt` CLI. bd 1.3.1 always reads and pushes the Dolt branch `main`, so every history
+query names `main` explicitly and the guard refuses to run at all if the `dolt`
+CLI has any other branch checked out. In published mode (and in `--local` mode) it takes
 the trusted baseline in `scripts/beads-history-baseline.txt` (a Dolt commit; it
 must be an ancestor of HEAD) and dumps every change made by the commits after
 it: row-level diffs (`dolt_diff_<table>`, added, modified and removed rows) of

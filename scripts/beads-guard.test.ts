@@ -724,6 +724,39 @@ describe.skipIf(!hasDolt)("beads-guard.sh history (commits after a trusted base)
     });
   });
 
+  test("a checked-out branch other than main is refused by every subcommand that reads the store", () => {
+    withTempDir((dir) => {
+      const w = initWorkspace(dir, 1);
+      const base = head(w);
+      // A leak and then a hide commit on main...
+      sql(w, "INSERT INTO config (`key`, value) VALUES ('export.exclude_owners', 'tester')");
+      commit(w, "leak");
+      sql(w, "DELETE FROM config WHERE `key` = 'export.exclude_owners'");
+      commit(w, "hide");
+      const out = join(dir, "out");
+      mkdirSync(out);
+      // ...is caught on main,
+      expect(history(w, base, out).status).toBe(1);
+
+      // ...but if the dolt CLI has a branch at the base checked out, the guard must not
+      // quietly scan that branch's empty range and pass.
+      execFileSync("dolt", ["checkout", "-b", "clean", base], { cwd: w.store, env: w.env, stdio: "pipe" });
+      for (const args of [["history", base, join(dir, "out2")], ["synced-tables", join(dir, "out2")], ["remote-base"]]) {
+        mkdirSync(join(dir, "out2"), { recursive: true });
+        const result = g(w, w.env, ...args);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("branch 'clean' checked out");
+        expect(result.stderr).toContain("'main'");
+      }
+
+      // Back on main, the same scan fails again for the real reason.
+      execFileSync("dolt", ["checkout", "-f", "main"], { cwd: w.store, env: w.env, stdio: "pipe" });
+      const again = history(w, base, out);
+      expect(again.status).toBe(1);
+      expect(again.stderr).toContain("export.exclude_owners");
+    });
+  });
+
   test("a base that is not an ancestor, or not a commit, fails closed", () => {
     withTempDir((dir) => {
       const w = initWorkspace(dir, 0);

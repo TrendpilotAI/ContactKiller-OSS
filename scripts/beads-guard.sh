@@ -29,7 +29,7 @@
 #   beads-guard.sh remote-base [remote]    fetch <remote> (default origin) with the
 #                                          dolt CLI and print its head commit, or
 #                                          ROOT if it has none; fails if that head
-#                                          is not an ancestor of local HEAD
+#                                          is not an ancestor of local main
 #
 # Why: `bd export` silently drops issues whose creator matches
 # export.exclude_owner / export.exclude_owners, and a bare `bd list` silently
@@ -40,6 +40,10 @@
 # is the backstop for anything else that makes the export differ from what bd
 # lists; it cannot see a filter that also hides records from `bd list` itself,
 # which is why the config guard rejects the keys outright.
+#
+# bd 1.3.1 always reads and pushes the Dolt branch "main". Everything here that
+# touches the store refuses unless "main" is the checked-out branch, and history
+# queries name "main" rather than HEAD.
 #
 # dolt.auto-push makes every bd write push to the public remote on its own,
 # bypassing scripts/bd-push.sh and every scan, so it must be off in every source
@@ -58,6 +62,15 @@ dolt_store() {
   esac
   store="${BEADS_DIR:-.beads}/embeddeddolt/$db"
   [ -d "$store" ] || { echo "no embedded Dolt store at $store" >&2; exit 1; }
+  # bd 1.3.1 always reads and pushes the Dolt branch "main". If the dolt CLI has some
+  # other branch checked out, queries here would describe a different history than
+  # the one that gets published, so refuse outright.
+  local active
+  active="$(dq_csv "SELECT active_branch()" | tr -d '"')"
+  if [ "$active" != "main" ]; then
+    echo "the Dolt store has branch '$active' checked out, but bd reads and pushes 'main'; refusing to scan the wrong history" >&2
+    exit 1
+  fi
 }
 dq() { (cd "$store" && dolt sql -r json -q "$1"); }
 dq_csv() { (cd "$store" && dolt sql -r csv -q "$1" | tail -n +2); }
@@ -312,16 +325,16 @@ case "$cmd" in
     dir="${3:?usage: $0 history <base|ROOT> <dir>}"
     dolt_store
     case "$base" in
-      ROOT) range="HEAD" ;;
+      ROOT) range="main" ;;
       *[!0-9a-v]*|"") echo "invalid Dolt commit hash: $base" >&2; exit 1 ;;
       *)
-        merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$base', 'HEAD')" | tr -d '"')" \
+        merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$base', 'main')" | tr -d '"')" \
           || { echo "Dolt commit $base is not in this store's history" >&2; exit 1; }
         if [ "$merge_base" != "$base" ]; then
-          echo "Dolt commit $base is not an ancestor of HEAD; cannot establish which commits are new" >&2
+          echo "Dolt commit $base is not an ancestor of main; cannot establish which commits are new" >&2
           exit 1
         fi
-        range="$base..HEAD"
+        range="$base..main"
         ;;
     esac
     out="$dir/history"
@@ -347,8 +360,8 @@ case "$cmd" in
     if [ "$base" = ROOT ]; then
       echo "no base commit: the whole history is dumped in the diff_*.json files" > "$out/net.diff"
     else
-      (cd "$store" && dolt diff "$base" HEAD) > "$out/net.diff" \
-        || { echo "dolt diff $base HEAD failed; refusing to continue" >&2; exit 1; }
+      (cd "$store" && dolt diff "$base" main) > "$out/net.diff" \
+        || { echo "dolt diff $base main failed; refusing to continue" >&2; exit 1; }
       [ -s "$out/net.diff" ] || echo "no changes after $base" > "$out/net.diff"
     fi
 
@@ -374,9 +387,9 @@ case "$cmd" in
       echo ROOT
       exit 0
     fi
-    merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$head', 'HEAD')" | tr -d '"')"
+    merge_base="$(dq_csv "SELECT DOLT_MERGE_BASE('$head', 'main')" | tr -d '"')"
     if [ "$merge_base" != "$head" ]; then
-      echo "the remote head $head is not an ancestor of local HEAD; a push would not be a fast-forward" >&2
+      echo "the remote head $head is not an ancestor of local main; a push would not be a fast-forward" >&2
       exit 1
     fi
     echo "$head"
