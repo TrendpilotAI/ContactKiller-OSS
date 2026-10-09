@@ -19,9 +19,11 @@ export interface ProviderContact {
   // The provider's identifier for this contact: Google's resourceName, or a
   // vCard UID.
   providerId: string
-  // False when the identifier was invented for this run (a card without a UID).
-  // It cannot recognise the contact next time, so it never blocks or replaces
-  // a link the contact already has.
+  // False when the identifier is a random throwaway invented for this run (a
+  // card without a UID). It is used only to tell cards in one batch apart and is
+  // never stored as a platform link: it could not recognise the contact next
+  // time, and an invented link would stand in the way of linking the real id
+  // later.
   stableId: boolean
   fields: ImportedFields
   emails: { email: string; label: string }[]
@@ -136,10 +138,6 @@ export async function reconcileProviderContacts(
   const decisions = new Map<string, Decision>()
   for (const candidate of candidates) {
     const linked = candidate.stableId ? index.linkIds.get(candidate.providerId) : undefined
-    if (linked) {
-      decisions.set(candidate.providerId, { kind: 'update', target: linked, linkedById: true, hasLink: true })
-      continue
-    }
 
     const targets = new Set<string>()
     // An address held by several provider contacts is not evidence that any of
@@ -154,7 +152,18 @@ export async function reconcileProviderContacts(
       for (const contact of localPhones.get(phone) ?? []) targets.add(contact)
     }
 
-    if (targets.size > 1) {
+    if (linked) {
+      // The id is the strongest evidence, but a card whose exact email or phone
+      // belongs to a different contact is contradicting itself: do not merge.
+      if ([...targets].some(target => target !== linked)) {
+        decisions.set(candidate.providerId, {
+          kind: 'skip',
+          reason: `its ${label} id is linked to one contact but its email or phone match a different contact`,
+        })
+      } else {
+        decisions.set(candidate.providerId, { kind: 'update', target: linked, linkedById: true, hasLink: true })
+      }
+    } else if (targets.size > 1) {
       decisions.set(candidate.providerId, {
         kind: 'skip',
         reason: 'its identifiers match more than one existing contact',
@@ -181,22 +190,25 @@ export async function reconcileProviderContacts(
     }
   }
 
-  // Pass 2: two provider contacts claiming the same local contact are both
-  // ambiguous; neither may take it.
+  // Pass 2: a local contact may be taken by one provider contact only. When
+  // several claim it, a card that reached it through its own link keeps it and
+  // every card that merely matched an email or phone is ambiguous and skipped;
+  // with no link-holder, all of them are skipped.
   const claims = new Map<string, string[]>()
   for (const [providerId, decision] of decisions) {
-    if (decision.kind === 'update' && !decision.linkedById) {
+    if (decision.kind === 'update') {
       claims.set(decision.target, [...(claims.get(decision.target) ?? []), providerId])
     }
   }
   for (const claimants of claims.values()) {
-    if (claimants.length > 1) {
-      for (const providerId of claimants) {
-        decisions.set(providerId, {
-          kind: 'skip',
-          reason: `the matching contact was also matched by another ${label} contact`,
-        })
-      }
+    if (claimants.length < 2) continue
+    for (const providerId of claimants) {
+      const decision = decisions.get(providerId)!
+      if (decision.kind === 'update' && decision.linkedById) continue
+      decisions.set(providerId, {
+        kind: 'skip',
+        reason: `the matching contact was also matched by another ${label} contact`,
+      })
     }
   }
 
@@ -243,8 +255,9 @@ export async function reconcileProviderContacts(
         skip(candidate, decision.reason)
       } else if (decision.kind === 'update') {
         // Attach a link when the contact has none, or when it is the one this
-        // very id already points at (to touch last_synced_at).
-        await updateExisting(candidate, decision.target, decision.linkedById || !decision.hasLink)
+        // very id already points at (to touch last_synced_at). A throwaway id is
+        // never stored.
+        await updateExisting(candidate, decision.target, candidate.stableId && (decision.linkedById || !decision.hasLink))
       } else {
         try {
           const created = await createContact(db, userId, {
@@ -255,7 +268,7 @@ export async function reconcileProviderContacts(
             },
             emails: candidate.emails.map((e, i) => ({ value: e.email, label: e.label, is_primary: i === 0 })),
             phones: candidate.phones.map((p, i) => ({ value: p.phone, label: p.label, is_primary: i === 0 })),
-            links: [{ platform, platform_id: candidate.providerId }],
+            links: candidate.stableId ? [{ platform, platform_id: candidate.providerId }] : [],
           })
           result.conflicts += await fileConflictsOnce(db, userId, created, sharedEmailConflicts(candidate))
           if (candidate.sharedEmails.length > 0) result.sharedEmailContacts++

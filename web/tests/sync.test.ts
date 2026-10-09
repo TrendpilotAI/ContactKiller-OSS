@@ -234,6 +234,85 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         }
       })
 
+      test('the key is the E.164 number plus the extension, so extensions never collapse into the main number', () => {
+        const main = '+12125550100'
+        expect(normalizePhone('+1 212-555-0100')).toBe(main)
+        expect(normalizePhone('+1 212-555-0100 ext. 5')).toBe(`${main};ext=5`)
+        expect(normalizePhone('+1 212-555-0100 ext. 5')).not.toBe(normalizePhone('+1 212-555-0100 ext. 6'))
+        expect(normalizePhone('+1 212-555-0100 ext. 5')).not.toBe(normalizePhone('+1 212-555-0100'))
+        expect(normalizePhone('+1 212-555-0100 ext. 5')).not.toBe(main)
+
+        // The same extension in every common spelling is one key.
+        const spellings = [
+          '+1 212-555-0100 x5',
+          '+1 212-555-0100 x 5',
+          '+1 212-555-0100;ext=5',
+          '+1 212-555-0100 ;ext=5',
+          '+1 212-555-0100 ext 5',
+          '+1 212-555-0100 ext. 5',
+          '(212) 555-0100 EXT. 5',
+          '212.555.0100 extension 5',
+          '2125550100,x5',
+        ]
+        for (const spelling of spellings) expect(normalizePhone(spelling)).toBe(`${main};ext=5`)
+
+        // Bare numbers still equal each other however they are written.
+        expect(normalizePhone('2125550100')).toBe(main)
+        expect(normalizePhone('+12125550100')).toBe(main)
+        expect(normalizePhone('(212) 555-0100')).toBe(main)
+        expect(normalizePhone('212/555/0100')).toBe(main)
+      })
+
+      test('text around a number makes it prose, never a key', () => {
+        for (const prose of [
+          'Call me at +1 (212) 555-0100',
+          'ask for Pat 212-555-0100',
+          '212-555-0100 (home)',
+          '212-555-0100 or 212-555-0101',
+          'tel:+12125550100',
+          '+1 212-555-0100 ext. five',
+          '+1 212-555-0100 ext. 5 after hours',
+        ]) {
+          expect(normalizePhone(prose)).toBeNull()
+        }
+      })
+
+      test('ext 5, ext 6, and no extension are three different people at one main number', async () => {
+        const user = await fresh('extensions')
+        try {
+          const bare = await seedLocal(user, { display_name: 'Main Line' }, { phones: ['+1 212-555-0100'] })
+          const ext5 = await seedLocal(user, { display_name: 'Desk Five' }, { phones: ['+1 212-555-0100 ext. 5'] })
+
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/e6', names: [{ displayName: 'Desk Six' }], phoneNumbers: [{ value: '212-555-0100 x6' }] },
+            { resourceName: 'people/e5', names: [{ displayName: 'Desk Five' }], phoneNumbers: [{ value: '(212) 555-0100;ext=5' }] },
+            { resourceName: 'people/e0', names: [{ displayName: 'Main Line' }], phoneNumbers: [{ value: '2125550100' }] },
+          ])
+          expect(result).toMatchObject({ imported: 1, updated: 2, skipped: [], errors: [] })
+          expect((await getContact(user.db, ext5))!.platform_links.map((l) => l.platform_id)).toEqual(['people/e5'])
+          expect((await getContact(user.db, bare))!.platform_links.map((l) => l.platform_id)).toEqual(['people/e0'])
+          const six = (await listContacts(user.db)).find((c) => c.display_name === 'Desk Six')!
+          expect(six.platform_links.map((l) => l.platform_id)).toEqual(['people/e6'])
+          expect(await listContacts(user.db)).toHaveLength(3)
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a phone buried in prose never matches the contact that has the number', async () => {
+        const user = await fresh('prose')
+        try {
+          const id = await seedLocal(user, { display_name: 'Real Number' }, { phones: ['+1 212-555-0100'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/prose', names: [{ displayName: 'Someone Else' }], phoneNumbers: [{ value: 'Call me at +1 (212) 555-0100' }] },
+          ])
+          expect(result).toMatchObject({ imported: 1, updated: 0, skipped: [] })
+          expect((await getContact(user.db, id))!.platform_links).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
       test('numbers that differ only in area code are different people', () => {
         expect(normalizePhone('(202) 555-0143')).not.toBe(normalizePhone('(212) 555-0143'))
       })
@@ -374,6 +453,47 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
           expect(result).toMatchObject({ imported: 0, updated: 0 })
           expect(result.skipped).toHaveLength(2)
           expect((await getContact(user.db, id))!.platform_links).toEqual([])
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a Google id linked to one contact whose email belongs to another is skipped, not merged', async () => {
+        const user = await fresh('trust')
+        try {
+          const owner = await seedLocal(user, { display_name: 'Linked Owner' }, { emails: ['owner@example.com'], googleId: 'people/trusted' })
+          const other = await seedLocal(user, { display_name: 'Someone Else', company: 'Keep Me' }, { emails: ['other@example.com'] })
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/trusted', names: [{ displayName: 'Linked Owner' }], emailAddresses: [{ value: 'other@example.com' }], organizations: [{ name: 'New Co' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 0, conflicts: 0, errors: [] })
+          expect(result.skipped).toEqual([expect.stringContaining('linked to one contact but its email or phone match a different contact')])
+          expect(await getContact(user.db, owner)).toMatchObject({ company: null })
+          expect(await getContact(user.db, other)).toMatchObject({ company: 'Keep Me', platform_links: [] })
+        } finally {
+          await user.db.close()
+        }
+      })
+
+      test('a contact reached by its own link and by another stable-id card in the same batch: only the link-holder keeps it', async () => {
+        const user = await fresh('linkclaim')
+        try {
+          const id = await seedLocal(
+            user,
+            { display_name: 'Held' },
+            { emails: ['held@example.com'], phones: ['(202) 555-0143'], googleId: 'people/holder' }
+          )
+          const result = await reconcileGoogleContacts(user.db, user.id, [
+            { resourceName: 'people/holder', names: [{ displayName: 'Held' }], organizations: [{ name: 'Holder Co' }] },
+            { resourceName: 'people/claimer', names: [{ displayName: 'Claimer' }], emailAddresses: [{ value: 'held@example.com' }], organizations: [{ name: 'Claimer Co' }] },
+          ])
+          expect(result).toMatchObject({ imported: 0, updated: 1, errors: [] })
+          expect(result.skipped).toEqual([expect.stringContaining('people/claimer')])
+          expect(result.skipped[0]).toContain('already linked to a different Google contact')
+          const contact = (await getContact(user.db, id))!
+          expect(contact).toMatchObject({ company: 'Holder Co' })
+          expect(contact.platform_links.map((l) => l.platform_id)).toEqual(['people/holder'])
+          expect(await listContacts(user.db)).toHaveLength(1)
         } finally {
           await user.db.close()
         }
@@ -635,7 +755,8 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         })
         expect(contact.emails[0]).toMatchObject({ email: 'lena@example.com', is_primary: true })
         expect(contact.phones[0].phone).toContain('555')
-        expect(contact.platform_links[0].platform).toBe('icloud')
+        // No UID on the card, so no link is stored for a throwaway id.
+        expect(contact.platform_links).toEqual([])
       } finally {
         await dave.db.close()
       }
@@ -687,7 +808,77 @@ describe.skipIf(!surrealAvailable)('provider imports', () => {
         const again = await importVcf(user.db, user.id, file)
         expect(again).toMatchObject({ imported: 0, updated: 1, skipped: [], errors: [] })
         expect(await listContacts(user.db)).toHaveLength(1)
-        expect(await linksOf(user)).toHaveLength(1)
+        // A throwaway id is never stored as a link.
+        expect(await linksOf(user)).toEqual([])
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a no-UID import stores no link, so a later import with real UIDs links the same person by email or phone', async () => {
+      const user = await fresh('upgrade')
+      try {
+        const first = await importVcf(
+          user.db,
+          user.id,
+          card('FN:Ivo One\r\nEMAIL:ivo-up@example.com') + card('FN:Pat Phone\r\nTEL:+1 212 555 0101')
+        )
+        expect(first).toMatchObject({ imported: 2, skipped: [] })
+        expect(await linksOf(user)).toEqual([])
+
+        const later = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-ivo', 'FN:Ivo One\r\nEMAIL:IVO-UP@example.com') + withUid('uid-pat', 'FN:Pat Phone\r\nTEL:(212) 555-0101')
+        )
+        expect(later).toMatchObject({ imported: 0, updated: 2, skipped: [], errors: [] })
+        expect(await listContacts(user.db)).toHaveLength(2)
+        expect((await linksOf(user)).sort()).toEqual(['uid-ivo', 'uid-pat'])
+
+        // And from then on the UID is the identity.
+        const third = await importVcf(user.db, user.id, withUid('uid-ivo', 'FN:Ivo One\r\nEMAIL:moved@example.com'))
+        expect(third).toMatchObject({ imported: 0, updated: 1 })
+        expect(await listContacts(user.db)).toHaveLength(2)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a UID-less card reaching a contact that a UID card also reaches in the same file is skipped', async () => {
+      const user = await fresh('uidless-claim')
+      try {
+        const id = await seedLocal(user, { display_name: 'Anchor' }, { emails: ['anchor@example.com'] })
+        await importVcf(user.db, user.id, withUid('uid-anchor', 'FN:Anchor\r\nEMAIL:anchor@example.com'))
+        const outcome = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-anchor', 'FN:Anchor\r\nORG:Anchor Co') + card('FN:No Uid\r\nEMAIL:anchor@example.com')
+        )
+        expect(outcome).toMatchObject({ imported: 0, updated: 1, errors: [] })
+        expect(outcome.skipped).toEqual([expect.stringContaining('also matched by another iCloud contact')])
+        expect((await getContact(user.db, id))!.platform_links.map((l) => l.platform_id)).toEqual(['uid-anchor'])
+        expect(await listContacts(user.db)).toHaveLength(1)
+      } finally {
+        await user.db.close()
+      }
+    })
+
+    test('a UID linked to one contact whose email belongs to another is skipped as ambiguous', async () => {
+      const user = await fresh('uidtrust')
+      try {
+        const owner = await seedLocal(user, { display_name: 'Card Owner' }, { emails: ['card-owner@example.com'] })
+        await importVcf(user.db, user.id, withUid('uid-owner', 'FN:Card Owner\r\nEMAIL:card-owner@example.com'))
+        const other = await seedLocal(user, { display_name: 'Other Person', company: 'Keep Me' }, { phones: ['(212) 555-0102'] })
+
+        const outcome = await importVcf(
+          user.db,
+          user.id,
+          withUid('uid-owner', 'FN:Card Owner\r\nTEL:+1 212 555 0102\r\nORG:Overwrite Co')
+        )
+        expect(outcome).toMatchObject({ imported: 0, updated: 0, conflicts: 0, errors: [] })
+        expect(outcome.skipped).toEqual([expect.stringContaining('linked to one contact but its email or phone match a different contact')])
+        expect(await getContact(user.db, owner)).toMatchObject({ company: null })
+        expect(await getContact(user.db, other)).toMatchObject({ company: 'Keep Me', platform_links: [] })
       } finally {
         await user.db.close()
       }

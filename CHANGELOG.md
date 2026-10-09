@@ -14,6 +14,7 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 - Google sync refreshes expired access tokens from the stored refresh token.
 - Sign-up is off by default and enforced by the database (rolling the gate back leaves it closed); every state-changing route checks the request origin, and JSON bodies are size-capped.
 - iCloud import follows the Google rules: it matches on the vCard UID, exact email or valid phone, fills empty fields, files conflicts instead of overwriting, imports contacts that share an email separately, and reports every card as created, matched, skipped, or errored. A failed sign-up now gives the same generic message for every cause.
+- Phone matching includes the extension, rejects values that are not just a number, and a card whose id points at one contact but whose email or phone point at another is skipped. Cards without a UID no longer store a throwaway link.
 - A provider identity is unique per user. Google contacts that share an email are imported separately and flagged for review rather than skipped or merged.
 
 ### Fixed
