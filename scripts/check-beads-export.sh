@@ -29,7 +29,8 @@
 # hold exactly the tickets `bd list` shows, when a scanned file carries a
 # gitleaks allow comment (all in scripts/beads-guard.sh), when gitleaks is not
 # 8.30.x, and when the Dolt store has an unknown table or a table that must stay
-# empty (including provenance_events) is not empty.
+# empty (including provenance_events) is not empty, and when a ticket whose latest
+# audit event is a "bd delete" is still in the export.
 #
 # Scanned: the current rows of `bd export --all`; the values of the config,
 # metadata, child_counters, issue_counter and schema_migrations tables; the audit
@@ -140,6 +141,24 @@ missing="$(comm -23 <(printf '%s\n' "$expected_ids") <(printf '%s\n' "$exported_
 if [ -n "$missing" ]; then
   echo "tickets recorded in the audit log are missing from the export:" >&2
   printf '%s\n' "$missing" >&2
+  exit 1
+fi
+# A ticket whose latest audit event deletes it must not be in the export either: the
+# deletion was recorded but never published, or the ticket was re-added without a
+# new "bd create" entry. On a pull request, deletions that the PR itself appends are
+# tolerated until their data is pushed (the same leniency as for new tickets), so
+# only deletions already in the base branch's log count; the push/schedule runs
+# apply the full log.
+deletion_scope="${BEADS_AUDIT_BASELINE:-$audit_log}"
+alive_in_scope="$(scripts/beads-expected-ids.sh "$deletion_scope")"
+created_in_scope="$(scripts/beads-expected-ids.sh --created "$deletion_scope")"
+alive_now="$(scripts/beads-expected-ids.sh "$audit_log")"
+deleted_ids="$(comm -23 <(printf '%s\n' "$created_in_scope") <(printf '%s\n' "$alive_in_scope") \
+  | comm -23 - <(printf '%s\n' "$alive_now"))"
+stale="$(comm -12 <(printf '%s\n' "$deleted_ids") <(printf '%s\n' "$exported_ids"))"
+if [ -n "$stale" ]; then
+  echo "tickets whose latest audit event is a \"bd delete\" are still present in the export (publish the deletion, or record a new \"bd create\" if the ticket really came back):" >&2
+  printf '%s\n' "$stale" >&2
   exit 1
 fi
 unrecorded="$(comm -13 <(printf '%s\n' "$created_ids") <(printf '%s\n' "$exported_ids"))"

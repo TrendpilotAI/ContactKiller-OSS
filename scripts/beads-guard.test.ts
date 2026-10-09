@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { addLocalFileRemote, assertNoRealRemote, hasTool, initWorkspace, isolatedEnv, sql, type Workspace } from "./beads-test-support";
@@ -867,3 +867,116 @@ exit 0
     });
   });
 });
+
+describe.skipIf(!hasDolt || spawnSync("sh", ["-c", "gitleaks version | grep -q '^8\\.30\\.'"]).status !== 0)(
+  "check-beads-export.sh --local: tickets deleted in the audit trail",
+  () => {
+    const scriptsDir = resolve(import.meta.dir);
+    const line = (tool: string, id: string) => JSON.stringify({ kind: "tool_call", tool_name: tool, issue_id: id, exit_code: 0 }) + "\n";
+
+    /** A throwaway workspace (no remote) with the real scan scripts copied in and one real ticket. */
+    function scanWorkspace(dir: string): { w: Workspace; id: string; run: (env?: NodeJS.ProcessEnv) => ReturnType<typeof spawnSync> } {
+      const w = initWorkspace(dir, 1);
+      const id = (JSON.parse(bd(w, "list", "--all", "--json").stdout) as Array<{ id: string }>)[0]!.id;
+      mkdirSync(join(w.ws, "scripts"));
+      for (const file of ["check-beads-export.sh", "beads-guard.sh", "beads-expected-ids.sh", "check-public-release.ts"]) {
+        copyFileSync(join(scriptsDir, file), join(w.ws, "scripts", file));
+        chmodSync(join(w.ws, "scripts", file), 0o755);
+      }
+      writeFileSync(
+        join(w.ws, "PUBLIC_RELEASE_MANIFEST.json"),
+        JSON.stringify({
+          schemaVersion: 3,
+          allowedFiles: [],
+          reviewedBinaryDigests: {},
+          requiredBinarySidecars: {},
+          forbiddenPrefixes: [],
+          forbiddenExtensions: [],
+          allowedEmailDomains: ["example.com"],
+          maxFileSizeBytes: 2000000,
+          requiredVcardMarker: "X-CONTACTKILLER-SYNTHETIC:TRUE",
+        }),
+      );
+      const baseline = JSON.parse(bd(w, "vc", "status", "--json").stdout).commit as string;
+      writeFileSync(join(w.ws, "scripts/beads-history-baseline.txt"), `# test baseline\n${baseline}\n`);
+      const run = (env: NodeJS.ProcessEnv = {}) => {
+        assertNoRealRemote(w.ws, w.env);
+        return spawnSync(join(w.ws, "scripts/check-beads-export.sh"), ["--local"], { cwd: w.ws, env: { ...w.env, ...env }, encoding: "utf8" });
+      };
+      return { w, id, run };
+    }
+    const setLog = (w: Workspace, content: string) => writeFileSync(join(w.ws, ".beads/interactions.jsonl"), content);
+
+    test("a created ticket that is still exported passes (sanity)", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        setLog(w, line("bd create", id));
+        expect(run().status).toBe(0);
+      });
+    });
+
+    test("a ticket whose latest audit event is a delete but that is still in the export fails", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        setLog(w, line("bd create", id) + line("bd delete", id));
+        const result = run();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("still present in the export");
+        expect(result.stderr).toContain(id);
+      });
+    });
+
+    test("a delete followed by a new create passes (the ticket came back)", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        setLog(w, line("bd create", id) + line("bd delete", id) + line("bd create", id));
+        expect(run().status).toBe(0);
+      });
+    });
+
+    test("the escape hatch still works: a really deleted ticket with a delete entry passes", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        expect(bd(w, "delete", id, "--force").status).toBe(0);
+        // A second ticket keeps the export non-empty.
+        const other = bd(w, "create", "--title", "other", "--description", "d", "--silent").stdout.trim();
+        setLog(w, line("bd create", id) + line("bd delete", id) + line("bd create", other));
+        expect(run().status).toBe(0);
+      });
+    });
+
+    test("without the delete entry the really deleted ticket is reported missing, as before", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        expect(bd(w, "delete", id, "--force").status).toBe(0);
+        const other = bd(w, "create", "--title", "other", "--description", "d", "--silent").stdout.trim();
+        setLog(w, line("bd create", id) + line("bd create", other));
+        const result = run();
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("missing from the export");
+      });
+    });
+
+    test("pull-request mode: a deletion already in the base log counts, one the PR adds is tolerated until pushed", () => {
+      withTempDir((dir) => {
+        const { w, id, run } = scanWorkspace(dir);
+        const baseline = join(dir, "baseline.jsonl");
+
+        // Deletion already merged into the base branch, ticket still published: fails.
+        writeFileSync(baseline, line("bd create", id) + line("bd delete", id));
+        setLog(w, readFileSync(baseline, "utf8"));
+        const merged = run({ BEADS_AUDIT_BASELINE: baseline });
+        expect(merged.status).toBe(1);
+        expect(merged.stderr).toContain("still present in the export");
+
+        // Deletion appended by the PR itself, not yet pushed: tolerated.
+        writeFileSync(baseline, line("bd create", id));
+        setLog(w, line("bd create", id) + line("bd delete", id));
+        expect(run({ BEADS_AUDIT_BASELINE: baseline }).status).toBe(0);
+
+        // The same log without a baseline (push to main, schedule) fails.
+        expect(run().status).toBe(1);
+      });
+    });
+  },
+);

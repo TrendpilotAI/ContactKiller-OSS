@@ -321,13 +321,19 @@ any Dolt commit after the baseline, or any scanner error fails the job.
   a ticket, record a `bd delete` audit entry for it (same `bd audit record`
   form, `"tool_name":"bd delete"`), or the scan will fail forever on the missing
   ticket. A later `bd create` for the same id makes it expected again.
+  The reverse also fails: a ticket whose latest audit event is a `bd delete`
+  must not be in the export. Publish the deletion (via `scripts/bd-push.sh`), or
+  record a new `bd create` if the ticket really came back.
 - **Pull requests.** `bd create` events come from the base branch's audit log,
   so a PR that records a new ticket is not red just because the ticket is not
   published yet. `bd delete` events that the PR itself appends are also applied
   (safe because the append-only check guarantees the PR's log extends the
-  base's), so a PR that deletes a published ticket is not red either. The PR's
-  own audit log and the published export are still scanned. After merge, the
-  `main` run expects new tickets to be published.
+  base's), so a PR that deletes a published ticket is not red for the missing
+  ticket. As with new tickets, a deletion that only the PR adds is tolerated
+  while the ticket is still published; deletions already in the base branch's
+  log must be reflected in the published data. The PR's own audit log and the
+  published export are still scanned. After merge, the `main` run (no baseline)
+  expects new tickets to be published and deleted ones to be gone.
 - **Append-only.** The public-release job requires the previous revision's
   `.beads/interactions.jsonl` to be a byte prefix of the new one
   (`scripts/check-audit-append-only.sh`): on pull requests against
