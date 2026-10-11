@@ -27,7 +27,7 @@
   "dependencies": {
     "googleapis": "^170.0.0",
     "libphonenumber-js": "^1.12.34",
-    "next": "15.5.21",
+    "next": "15.5.24",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "surrealdb": "2.0.10",
