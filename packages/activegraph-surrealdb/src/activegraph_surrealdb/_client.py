@@ -87,27 +87,37 @@ def parse_surreal_url(url: str) -> SurrealURL:
     """Split ``[surrealdb+]<sdk-url>[?ns=..&db=..]`` into its parts.
 
     Credentials are never read from the URL: a URL with a ``user:pass@`` part is
-    refused so secrets do not end up in logs or run listings.
+    refused so secrets do not end up in logs or run listings. Errors carry only
+    :func:`_redact_url`'s form of the URL, never the raw string.
     """
     if not isinstance(url, str) or not url:
         raise _config_error("the SurrealDB URL is empty", url=None)
+    redacted = _redact_url(url)
     raw = url[len(URL_PREFIX):] if url.lower().startswith(URL_PREFIX) else url
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+        has_userinfo = parts.username is not None or parts.password is not None
+    except ValueError:
+        # urlsplit's messages can quote the netloc, userinfo included.
+        raise _config_error("the SurrealDB URL could not be parsed", url=redacted) from None
+    if has_userinfo:
+        raise _config_error(
+            "credentials in the SurrealDB URL are not accepted",
+            url=redacted,
+            how_to_fix="Pass username= and password= instead of embedding them in the URL.",
+        )
     scheme = parts.scheme.lower()
     if scheme not in SUPPORTED_SCHEMES:
+        # Without "//", "name:secret@host" parses as scheme "name", so only
+        # echo the scheme when the redacted form kept the URL's shape.
+        shown = f" {parts.scheme!r}" if redacted != _REDACTED_URL else ""
         raise _config_error(
-            f"unsupported SurrealDB URL scheme {parts.scheme!r}",
-            url=url,
+            f"unsupported SurrealDB URL scheme{shown}",
+            url=redacted,
             how_to_fix=(
                 "Use ws://, wss://, http://, https://, mem://, or "
                 "surrealkv://<path> (optionally prefixed with surrealdb+)."
             ),
-        )
-    if parts.username is not None or parts.password is not None:
-        raise _config_error(
-            "credentials in the SurrealDB URL are not accepted",
-            url=None,
-            how_to_fix="Pass username= and password= instead of embedding them in the URL.",
         )
     namespace: Optional[str] = None
     database: Optional[str] = None
@@ -119,12 +129,44 @@ def parse_surreal_url(url: str) -> SurrealURL:
         else:
             raise _config_error(
                 f"unknown SurrealDB URL parameter {key!r}",
-                url=url,
+                url=redacted,
                 how_to_fix="Only ns (namespace) and db (database) are accepted.",
             )
     # Strip the query textually: urlunsplit would turn "mem://" into "mem:".
     sdk_url = raw.split("#", 1)[0].split("?", 1)[0]
     return SurrealURL(sdk_url=sdk_url, scheme=scheme, namespace=namespace, database=database)
+
+
+_REDACTED_URL = "<redacted SurrealDB URL>"
+
+
+def _redact_url(url: str) -> str:
+    """Return ``scheme://host[:port]/path?name&name`` for error messages.
+
+    Userinfo, query values, and fragments are dropped. A URL that cannot be
+    parsed, or whose path holds an ``@`` (``user:secret@host`` without ``//``
+    parses as a path), is replaced wholesale by a placeholder.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        names = [key for key, _ in parse_qsl(parts.query, keep_blank_values=True)]
+    except ValueError:
+        return _REDACTED_URL
+    if "@" in parts.path:
+        return _REDACTED_URL
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    redacted = f"{parts.scheme}://{host}{parts.path}" if parts.scheme else f"{host}{parts.path}"
+    if names:
+        redacted += "?" + "&".join(names)
+    return redacted
 
 
 class Connection:
