@@ -27,6 +27,12 @@ bun run build
 cd ../activegraph-contactkiller
 python -m pip install -e '.[test]'
 pytest
+
+# SurrealDB backend for ActiveGraph (embedded engines; set
+# ACTIVEGRAPH_SURREALDB_TEST_URL/_USER/_PASS to add a real server)
+cd ../packages/activegraph-surrealdb
+python -m pip install -e '.[test]'
+python -m pytest -rs
 ```
 
 ## Required test classes
