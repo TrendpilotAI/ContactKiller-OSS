@@ -92,6 +92,7 @@ Read [Architecture](docs/ARCHITECTURE.md), [ActiveGraph](docs/ACTIVEGRAPH.md), [
 activegraph-contactkiller/   ActiveGraph domain pack and tests
 docs/                        Public architecture, safety, and contributor guides
 examples/synthetic/          Synthetic contact fixtures and failure cases
+packages/activegraph-surrealdb/  Generic SurrealDB EventStore/GraphStore for ActiveGraph
 scripts/                     Read-only snapshots and disposable forensic tooling
 web/                         Next.js reconciliation prototype
 website/                     Public open-source launch site
@@ -133,6 +134,8 @@ python3 -m venv .venv
 python -m pip install -e '.[test]'
 pytest
 ```
+
+The optional SurrealDB backend for ActiveGraph lives in `packages/activegraph-surrealdb/`; its [README](packages/activegraph-surrealdb/README.md) covers setup and running the upstream conformance suites against a server or the embedded engines.
 
 ### Read-only local research tools
 

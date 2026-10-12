@@ -6,6 +6,17 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 
 ## [Unreleased]
 
+### Added
+
+- `packages/activegraph-surrealdb`: an installable SurrealDB backend for ActiveGraph 1.12. It contains:
+  - `SurrealEventStore`, an EventStore with run metadata, snapshots and fork;
+  - `SurrealGraphStore`, a durable GraphStore projection;
+  - a shipped SurrealQL schema with an idempotent `apply_schema()`;
+  - `open_surreal_store()` for ws, wss, http, https, `mem://` and `surrealkv://` URLs.
+
+  Appends and truncation compare the run head inside a SurrealQL transaction and raise ActiveGraph's `ConcurrentWriterError` on a stale writer or a commit conflict. The upstream EventStore and GraphStore conformance suites pass unmodified. A new CI job runs them against a real SurrealDB server.
+- `.agents/skills/activegraph-surrealdb`: an agent skill for installing, configuring and testing the adapter.
+
 ### Changed
 
 - The web prototype now persists to SurrealDB. Accounts and sessions use SurrealDB record access, tenant isolation is enforced by owner-scoped table permissions, and provider OAuth tokens are encrypted by the application before storage. Supabase was removed; a `/login` screen was added because the prototype previously relied on an externally established session.

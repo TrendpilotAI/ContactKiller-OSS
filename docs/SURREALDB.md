@@ -20,7 +20,20 @@ The web prototype (`web/`) is SurrealDB-only. It replaces the earlier hosted-Pos
 - numbered SurrealQL migrations with checksums, transactional apply, and rollback files; and
 - tests that run against a real in-memory SurrealDB server.
 
-These tables are mutable application state. Raw source payloads, content hashes, field-level provenance edges, append-only observations, ActiveGraph event storage, and graph projections are not implemented; non-public development work on those has not been reviewed for this repository.
+These tables are mutable application state. Raw source payloads, content hashes, field-level provenance edges, and append-only observations are not implemented in the web prototype.
+
+## ActiveGraph event storage
+
+An ActiveGraph adapter package exists: `packages/activegraph-surrealdb/`. Its contents:
+
+- `SurrealEventStore` keeps the ActiveGraph event log in SCHEMAFULL `ag_*` tables, with unique `(run_id, seq)` and `(run_id, event_id)` indexes.
+- `SurrealGraphStore` keeps a rebuildable graph projection.
+- Appends and truncation check the run head inside a SurrealQL transaction. A stale writer, or a commit `TransactionConflict`, raises ActiveGraph's `ConcurrentWriterError`.
+- `truncate_after` deletes the tail atomically.
+
+The package passes ActiveGraph's upstream `EventStoreConformance` and `GraphStoreConformance` suites unmodified. They run against a SurrealDB 3.3 server in CI and against the SDK's embedded `mem://` and `surrealkv://` engines.
+
+The adapter is not wired into the web prototype or made the default store of the ActiveGraph pack. Passing conformance shows protocol parity. It does not meet the acceptance gates below, in particular replay equivalence with the ContactKiller event history, tenant isolation, and backup and restore. Those gates still have to be met before SurrealDB holds ContactKiller's authoritative event history.
 
 ## Acceptance gates
 

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "activegraph-surrealdb"
+version = "0.1.0"
+description = "SurrealDB EventStore and GraphStore backend for ActiveGraph"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE*", "NOTICE"]
+authors = [{ name = "ContactKiller contributors" }]
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+]
+dependencies = [
+  "activegraph==1.12.0",
+  "surrealdb==2.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=9.0.3,<10"]
+
+[project.urls]
+Homepage = "https://github.com/TrendpilotAI/ContactKiller-OSS"
+Documentation = "https://github.com/TrendpilotAI/ContactKiller-OSS/tree/main/packages/activegraph-surrealdb"
+Repository = "https://github.com/TrendpilotAI/ContactKiller-OSS.git"
+Issues = "https://github.com/TrendpilotAI/ContactKiller-OSS/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+activegraph_surrealdb = ["schema.surql", "py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+# surrealdb 2.0.0's blocking ws client uses a websockets call that newer
+# websockets releases flag as deprecated; it is not raised by this package.
+filterwarnings = [
+  "ignore:connect\\(\\) must be used as a context manager:DeprecationWarning",
+]
