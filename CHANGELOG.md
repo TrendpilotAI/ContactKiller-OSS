@@ -6,6 +6,10 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 
 ## [Unreleased]
 
+### Added
+
+- The ActiveGraph replay tests can run against PostgreSQL through `CONTACTKILLER_TEST_POSTGRES_URL`, and CI runs them against PostgreSQL 16 as well as SQLite.
+
 ### Changed
 
 - The web prototype now persists to SurrealDB. Accounts and sessions use SurrealDB record access, tenant isolation is enforced by owner-scoped table permissions, and provider OAuth tokens are encrypted by the application before storage. Supabase was removed; a `/login` screen was added because the prototype previously relied on an externally established session.
@@ -24,6 +28,7 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 
 ### Fixed
 
+- Reopening an ActiveGraph run with `open_runtime` or `replay_runtime` no longer appends a `pack.loaded` event when the log already records the pack at the same version. Each boot used to grow the event log by one event and advance the run head, so on ActiveGraph 1.12 and later a second process opening the same run could fail with `ConcurrentWriterError` before writing anything. A pack missing from the log, or recorded at another version, is still loaded and recorded.
 - vCard import now reads property values instead of whole property lines and accepts LF line endings.
 - Conflict resolution only applies a fixed set of contact columns, and the conflict view reads the stored source labels.
 
