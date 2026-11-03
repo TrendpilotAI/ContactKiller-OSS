@@ -30,11 +30,13 @@ describe('OAuth state binding', () => {
     expect(verifyOAuthState(randomBytes(32), state, 'alice', now)).toBe(false)
 
     const [version, nonce, issuedAt, mac] = state.split('.')
-    const flip = (value: string) => `${value.slice(0, -1)}${value.endsWith('A') ? 'B' : 'A'}`
+    const flip = (value: string) => `${value.startsWith('A') ? 'B' : 'A'}${value.slice(1)}`
+    const flipTrailing = (value: string) => `${value.slice(0, -1)}${value.endsWith('A') ? 'B' : 'A'}`
     for (const forged of [
       [version, flip(nonce), issuedAt, mac],
       [version, nonce, String(Number(issuedAt) + 1), mac],
       [version, nonce, issuedAt, flip(mac)],
+      [version, nonce, issuedAt, flipTrailing(mac)],
       ['v2', nonce, issuedAt, mac],
       [version, nonce, issuedAt, ''],
       [version, nonce, issuedAt],
