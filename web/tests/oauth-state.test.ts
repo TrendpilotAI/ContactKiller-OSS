@@ -31,12 +31,20 @@ describe('OAuth state binding', () => {
 
     const [version, nonce, issuedAt, mac] = state.split('.')
     const flip = (value: string) => `${value.startsWith('A') ? 'B' : 'A'}${value.slice(1)}`
-    const flipTrailing = (value: string) => `${value.slice(0, -1)}${value.endsWith('A') ? 'B' : 'A'}`
+    const b64url = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+    const flipPaddingBit = (value: string) => {
+      const idx = b64url.indexOf(value.at(-1)!)
+      return `${value.slice(0, -1)}${b64url[idx ^ 1]}`
+    }
+    const nonCanonicalMac = flipPaddingBit(mac)
+    expect(nonCanonicalMac).not.toBe(mac)
+    expect(Buffer.from(nonCanonicalMac, 'base64url').equals(Buffer.from(mac, 'base64url'))).toBe(true)
+
     for (const forged of [
       [version, flip(nonce), issuedAt, mac],
       [version, nonce, String(Number(issuedAt) + 1), mac],
       [version, nonce, issuedAt, flip(mac)],
-      [version, nonce, issuedAt, flipTrailing(mac)],
+      [version, nonce, issuedAt, nonCanonicalMac],
       ['v2', nonce, issuedAt, mac],
       [version, nonce, issuedAt, ''],
       [version, nonce, issuedAt],
