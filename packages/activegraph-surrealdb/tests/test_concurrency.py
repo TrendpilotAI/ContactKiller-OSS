@@ -263,3 +263,56 @@ def test_commit_transaction_conflict_maps_to_concurrent_writer(
         actual_count=0,
     )
     assert store.count() == 0
+
+
+def test_racing_truncators_and_appenders_leave_consistent_head(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent truncators and appenders racing from the same head:
+    exactly one writer succeeds and the surviving log and head stay consistent."""
+    seed = session.event_store("run_cw_mixed_race")
+    for i in range(4):
+        seed.append(make_event(f"evt_{i}"))
+
+    writers = 6
+    clients = (
+        [session.new_client() for _ in range(writers)]
+        if session.target.kind == "server"
+        else [session.client] * writers
+    )
+    stores = [SurrealEventStore(client, run_id="run_cw_mixed_race") for client in clients]
+    for store in stores:
+        _disable_precheck(monkeypatch, store)
+    barrier = threading.Barrier(writers)
+    outcomes: list[object] = [None] * writers
+
+    def attempt(index: int) -> None:
+        barrier.wait()
+        try:
+            if index % 2 == 0:
+                stores[index].truncate_after("evt_1")
+                outcomes[index] = ("truncate", index)
+            else:
+                stores[index].append(make_event(f"evt_race_{index}"))
+                outcomes[index] = ("append", index)
+        except Exception as exc:
+            outcomes[index] = exc
+
+    threads = [threading.Thread(target=attempt, args=(i,)) for i in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    winners = [o for o in outcomes if isinstance(o, tuple)]
+    losers = [o for o in outcomes if not isinstance(o, tuple)]
+    assert len(winners) == 1
+    assert all(isinstance(o, ConcurrentWriterError) for o in losers), losers
+    kind, idx = winners[0]
+    inspector = session.event_store("run_cw_mixed_race")
+    if kind == "truncate":
+        assert _ids(inspector) == ["evt_0", "evt_1"]
+        assert inspector.count() == 2
+    else:
+        assert _ids(inspector) == ["evt_0", "evt_1", "evt_2", "evt_3", f"evt_race_{idx}"]
+        assert inspector.count() == 5

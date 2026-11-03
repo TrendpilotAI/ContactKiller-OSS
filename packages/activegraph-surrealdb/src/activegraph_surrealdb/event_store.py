@@ -100,6 +100,9 @@ IF (SELECT * FROM ONLY $new_run_record) != NONE
     THROW "{RUN_EXISTS}";
 }};
 LET $parent = (SELECT * FROM ONLY $parent_run_record);
+IF $parent = NONE {{
+    THROW "{EVENT_MISSING}";
+}};
 CREATE $new_run_record CONTENT {{
     run_id: $new_run_id,
     parent_run_id: $parent_run_id,
@@ -349,6 +352,38 @@ class SurrealEventStore:
     # ---------- database-level helpers ----------
 
     @classmethod
+    def catalog_status(
+        cls,
+        target: Any,
+        run_id: str,
+        namespace: Optional[str] = None,
+        database: Optional[str] = None,
+        **auth: Any,
+    ) -> tuple[bool, int]:
+        """Return ``(has_canonical_row, event_count)`` without inserting a run
+        or running schema DDL (matching the ActiveGraph 1.13 reference stores)."""
+        with _scoped(target, namespace, database, auth, ensure_schema=False) as conn:
+            info = conn.query("INFO FOR DB;")[0]
+            tables = set((info.get("tables") if isinstance(info, dict) else None) or ())
+            if "ag_run" not in tables and "ag_event" not in tables:
+                return (False, 0)
+            present = False
+            if "ag_run" in tables:
+                row = conn.query(
+                    "SELECT * FROM ONLY $run_record;",
+                    {"run_record": _run_record(run_id)},
+                )[0]
+                present = row is not None
+            count = 0
+            if "ag_event" in tables:
+                rows = conn.query(
+                    "SELECT count() AS n FROM ag_event WHERE run_id = $run_id GROUP ALL;",
+                    {"run_id": run_id},
+                )[0]
+                count = int(rows[0]["n"]) if rows else 0
+            return (present, count)
+
+    @classmethod
     def list_runs(cls, target: Any, namespace: Optional[str] = None,
                   database: Optional[str] = None, **auth: Any) -> list[RunRecord]:
         """Every registered run (``upsert_run``/``fork_run``), oldest first."""
@@ -359,19 +394,36 @@ class SurrealEventStore:
     @classmethod
     def most_recent_run_id(cls, target: Any, namespace: Optional[str] = None,
                            database: Optional[str] = None, **auth: Any) -> Optional[str]:
-        """The registered run appended to most recently; runs without events
-        follow, newest ``created_at`` first (the reference stores' order)."""
-        with _scoped(target, namespace, database, auth) as conn:
+        """The registered run with the highest retained ``head_seq`` (tie-broken
+        by ``appended_at`` and ``created_at``); runs without events follow,
+        newest ``created_at`` first (matching the ActiveGraph 1.13 reference
+        stores, without running schema DDL on an uninitialized database)."""
+        with _scoped(target, namespace, database, auth, ensure_schema=False) as conn:
+            info = conn.query("INFO FOR DB;")[0]
+            tables = set((info.get("tables") if isinstance(info, dict) else None) or ())
+            if "ag_run" not in tables:
+                return None
+            if "ag_run_head" not in tables:
+                runs = conn.query("SELECT run_id, created_at FROM ag_run;")[0]
+                if not runs:
+                    return None
+                return max(runs, key=lambda r: r["created_at"])["run_id"]
             runs, heads = conn.query(
                 "SELECT run_id, created_at FROM ag_run;"
-                "SELECT run_id, appended_at FROM ag_run_head WHERE event_count > 0;"
+                "SELECT run_id, head_seq, appended_at FROM ag_run_head WHERE event_count > 0;"
             )
-        appended = {row["run_id"]: row.get("appended_at") for row in heads}
+        head_by_run = {
+            row["run_id"]: (int(row.get("head_seq") or 0), str(row.get("appended_at") or ""))
+            for row in heads
+        }
         if not runs:
             return None
-        with_events = [r for r in runs if appended.get(r["run_id"]) is not None]
+        with_events = [r for r in runs if r["run_id"] in head_by_run]
         if with_events:
-            return max(with_events, key=lambda r: appended[r["run_id"]])["run_id"]
+            return max(
+                with_events,
+                key=lambda r: (*head_by_run[r["run_id"]], str(r.get("created_at") or "")),
+            )["run_id"]
         return max(runs, key=lambda r: r["created_at"])["run_id"]
 
     @classmethod
@@ -527,21 +579,23 @@ def open_surreal_store(
 
 
 class _scoped:
-    """Context manager: a Connection for a classmethod, schema applied."""
+    """Context manager: a Connection for a classmethod."""
 
     def __init__(self, target: Any, namespace: Optional[str], database: Optional[str],
-                 auth: dict[str, Any]) -> None:
+                 auth: dict[str, Any], *, ensure_schema: bool = True) -> None:
         unknown = set(auth) - {"username", "password", "auth_scope"}
         if unknown:
             raise TypeError(f"unexpected keyword arguments: {sorted(unknown)}")
+        self._ensure_schema = ensure_schema
         self._conn = Connection(target, namespace=namespace, database=database, **auth)
 
     def __enter__(self) -> Connection:
-        try:
-            _apply_schema(self._conn)
-        except BaseException:
-            self._conn.close()
-            raise
+        if self._ensure_schema:
+            try:
+                _apply_schema(self._conn)
+            except BaseException:
+                self._conn.close()
+                raise
         return self._conn
 
     def __exit__(self, *exc: Any) -> None:

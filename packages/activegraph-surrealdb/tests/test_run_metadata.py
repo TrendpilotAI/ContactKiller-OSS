@@ -48,6 +48,74 @@ def test_list_runs_and_most_recent(session: Session) -> None:
     ]
 
 
+def test_catalog_status_is_read_only_and_detects_orphans(session: Session) -> None:
+    # Before any store touches the database, catalog_status returns (False, 0)
+    # without applying the schema.
+    assert SurrealEventStore.catalog_status(session.client, "run_cat") == (False, 0)
+    info = session.client.query_raw("INFO FOR DB;", {})["result"][0]["result"]
+    assert "ag_run" not in info.get("tables", {})
+
+    store = session.event_store("run_cat")
+    # Events without an ag_run row report (False, event_count).
+    store.append(make_event("evt_orphan"))
+    assert SurrealEventStore.catalog_status(session.client, "run_cat") == (False, 1)
+
+    store.upsert_run(created_at="2026-01-01T00:00:00Z")
+    assert SurrealEventStore.catalog_status(session.client, "run_cat") == (True, 1)
+
+
+def test_most_recent_run_id_uses_retained_head_seq_after_truncation(session: Session) -> None:
+    r1 = session.event_store("run_seq_1")
+    r2 = session.event_store("run_seq_2")
+    r1.upsert_run(created_at="2026-01-01T00:00:00Z")
+    r2.upsert_run(created_at="2026-01-02T00:00:00Z")
+    r1.append(make_event("evt_1"))
+    r2.append(make_event("evt_1"))
+    r2.append(make_event("evt_2"))
+    r1.append(make_event("evt_2"))
+    r1.append(make_event("evt_3"))
+    assert SurrealEventStore.most_recent_run_id(session.client) == "run_seq_1"
+
+    # Truncating r1 back to seq 1 leaves r2 (head_seq 2) with the highest retained head.
+    r1.truncate_after("evt_1")
+    assert SurrealEventStore.most_recent_run_id(session.client) == "run_seq_2"
+
+
+def test_fork_run_requires_registered_parent_and_preserves_seq_after_truncate(session: Session) -> None:
+    unregistered = session.event_store("run_unregistered_parent")
+    unregistered.append(make_event("evt_0"))
+    with pytest.raises(EventNotFoundError):
+        SurrealEventStore.fork_run(
+            session.client,
+            parent_run_id="run_unregistered_parent",
+            new_run_id="run_orphan_child",
+            at_event_id="evt_0",
+            label=None,
+            created_at="2026-01-02T00:00:00Z",
+        )
+
+    parent = session.event_store("run_truncated_parent")
+    parent.upsert_run(created_at="2026-01-01T00:00:00Z")
+    parent.append(make_event("evt_0"))
+    parent.append(make_event("evt_1"))
+    parent.truncate_after("evt_0")
+    parent.append(make_event("evt_2"))  # seq 3 (non-contiguous after truncate)
+
+    copied = SurrealEventStore.fork_run(
+        session.client,
+        parent_run_id="run_truncated_parent",
+        new_run_id="run_truncated_child",
+        at_event_id="evt_2",
+        label="after-truncate",
+        created_at="2026-01-03T00:00:00Z",
+    )
+    assert copied == 2
+    child = session.event_store("run_truncated_child")
+    assert [e.id for e in child.iter_events()] == ["evt_0", "evt_2"]
+    child.append(make_event("evt_3"))
+    assert [e.id for e in child.iter_events()] == ["evt_0", "evt_2", "evt_3"]
+
+
 def test_fork_run_copies_the_prefix_with_lineage(session: Session) -> None:
     parent = session.event_store("run_parent")
     parent.upsert_run(created_at="2026-01-01T00:00:00Z", goal="parent goal")

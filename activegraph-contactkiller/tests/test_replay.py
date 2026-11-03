@@ -270,3 +270,94 @@ def test_pack_missing_from_the_log_is_recorded_once_on_replay(event_store) -> No
     second = replay_runtime(store_url, run_id="packless_contacts")
     assert [event.type for event in second.graph.events] == ["pack.loaded"]
     _close(second)
+
+
+def test_unfired_events_survive_reopen_and_fire_on_next_drain(event_store) -> None:
+    """An event persisted after the last runtime.idle (before the process
+    drained the queue) is requeued on reopen and fires its pack behavior
+    once without duplicate pack.loaded events."""
+    store_url = event_store.url
+    first = open_runtime(store_url, run_id="canonical_unfired")
+    people = [_person(first, f"canonical:unfired:{index}") for index in range(2)]
+    first.run_until_idle()
+    email = "unfired@example.com"
+    first.graph.add_object(
+        "identity_observation",
+        {
+            "observation_key": "unfired-email:0",
+            "source_record_key": "unfired-source:0",
+            "person_id": people[0].id,
+            "kind": "email",
+            "normalized_value": email,
+            "value_sha256": sha256_text(email),
+            "observed_at": "2026-08-30T16:00:00Z",
+        },
+    )
+    first.run_until_idle()
+    # Persist the second observation without calling run_until_idle():
+    first.graph.add_object(
+        "identity_observation",
+        {
+            "observation_key": "unfired-email:1",
+            "source_record_key": "unfired-source:1",
+            "person_id": people[1].id,
+            "kind": "email",
+            "normalized_value": email,
+            "value_sha256": sha256_text(email),
+            "observed_at": "2026-08-30T16:01:00Z",
+        },
+    )
+    assert first.pending_approvals() == []
+    first.save_state()
+    _close(first)
+
+    # Reopen without draining, then reopen again and drain:
+    reopened_undrained = open_runtime(store_url, run_id="canonical_unfired")
+    _close(reopened_undrained)
+
+    reopened = open_runtime(store_url, run_id="canonical_unfired")
+    reopened.run_until_idle()
+    assert len(reopened.pending_approvals()) == 1
+    assert [e.type for e in reopened.graph.events].count("pack.loaded") == 1
+    numbers = [int(e.id.removeprefix("evt_")) for e in reopened.graph.events]
+    assert numbers == list(range(1, len(numbers) + 1))
+    _close(reopened)
+
+
+def test_truncate_after_and_replay_rebuilds_truncated_prefix(event_store) -> None:
+    """Truncating a run's event log and replaying rebuilds only the prefix
+    state, and subsequent appends continue cleanly from the truncated head."""
+    store_url = event_store.url
+    runtime = open_runtime(store_url, run_id="canonical_truncate")
+    first_person = _person(runtime, "canonical:keep")
+    runtime.run_until_idle()
+    cut_event_id = runtime.graph.events[-1].id
+
+    dropped_person = _person(runtime, "canonical:drop")
+    runtime.run_until_idle()
+    runtime.save_state()
+    _close(runtime)
+
+    store = open_store(store_url, run_id="canonical_truncate")
+    try:
+        store.truncate_after(cut_event_id)
+    finally:
+        store.close()
+
+    reopened = open_runtime(store_url, run_id="canonical_truncate")
+    assert reopened.graph.get_object(first_person.id) is not None
+    assert reopened.graph.get_object(dropped_person.id) is None
+
+    continued = _person(reopened, "canonical:after-truncate")
+    reopened.run_until_idle()
+    reopened.save_state()
+    _close(reopened)
+
+    final = replay_runtime(store_url, run_id="canonical_truncate")
+    keys = sorted(
+        obj.data["person_key"]
+        for obj in final.graph.all_objects()
+        if obj.type == "person"
+    )
+    assert keys == ["canonical:after-truncate", "canonical:keep"]
+    _close(final)

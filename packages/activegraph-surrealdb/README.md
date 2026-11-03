@@ -4,8 +4,8 @@ A SurrealDB backend for [ActiveGraph](https://github.com/yoheinakajima/activegra
 
 - `SurrealEventStore` implements ActiveGraph's `EventStore` protocol (`append`,
   `iter_events`, `get_event`, `count`, `truncate_after`, `close`). It also has the
-  run-metadata, snapshot, and fork helpers the reference SQLite and Postgres stores
-  provide.
+  run-metadata (`get_run`, `upsert_run`, `catalog_status`, `list_runs`, `most_recent_run_id`),
+  snapshot, and fork helpers the reference SQLite and Postgres stores provide.
 - `SurrealGraphStore` implements the `GraphStore` ABC, a durable projection of
   objects, relations, and patches stored in SurrealDB tables.
 

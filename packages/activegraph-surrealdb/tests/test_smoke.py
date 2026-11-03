@@ -153,3 +153,51 @@ def test_scoped_user_authentication_against_server(auth_scope: str) -> None:
             store.close()
     finally:
         session.close()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [pytest.param(t, id=t.name, marks=pytest.mark.skipif(t.skip_reason is not None,
+                                                         reason=t.skip_reason or ""))
+     for t in ALL_TARGETS],
+)
+def test_strict_replay_after_truncation_and_continuation(target: Target) -> None:
+    session = target.session()
+    try:
+        from activegraph import Runtime
+
+        store = session.event_store("run_trunc_replay")
+        store.upsert_run(created_at="2026-01-01T00:00:00Z", label="trunc-replay")
+        live = Graph(ids=IDGen(), run_id="run_trunc_replay", graph_store=session.graph_store("live"))
+        rt = Runtime(live, store=store)
+        first = live.add_object("memo", {"text": "keep", "v": 1})
+        live.patch_object(first.id, {"text": "keep", "v": 2})
+        rt.run_until_idle()
+        cut_id = live.events[-1].id
+
+        discarded = live.add_object("memo", {"text": "discard", "v": 99})
+        rt.run_until_idle()
+        assert live.get_object(discarded.id) is not None
+
+        # Truncate back to cut_id and continue from a replayed handle:
+        store.truncate_after(cut_id)
+        resumed_store = session.event_store("run_trunc_replay")
+        resumed_proj = session.graph_store("resumed")
+        resumed_graph = Graph(ids=IDGen(), run_id="run_trunc_replay", graph_store=resumed_proj)
+        replay_into(resumed_graph, resumed_store.iter_events())
+        resumed_graph.ids.reseed_from_events(resumed_graph.events)
+        resumed_graph.attach_store(resumed_store)
+        resumed_rt = Runtime(resumed_graph, store=None)
+
+        assert resumed_graph.get_object(first.id).data == {"text": "keep", "v": 2}
+        assert resumed_graph.get_object(discarded.id) is None
+
+        replacement = resumed_graph.add_object("memo", {"text": "replacement", "v": 3})
+        resumed_rt.run_until_idle()
+
+        final_graph = Graph(ids=IDGen(), run_id="run_trunc_replay", graph_store=session.graph_store("final"))
+        replay_into(final_graph, session.event_store("run_trunc_replay").iter_events())
+        assert sorted(o.data["text"] for o in final_graph.all_objects()) == ["keep", "replacement"]
+        assert final_graph.get_object(replacement.id).data["v"] == 3
+    finally:
+        session.close()
