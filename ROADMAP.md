@@ -6,28 +6,32 @@ ContactKiller is moving from a personal recovery prototype toward a safe, reusab
 
 - [x] Provenance-first product model
 - [x] Experimental contact explorer and conflict-review surface
-- [x] One-way Google Contacts and iCloud vCard import paths
+- [x] SurrealDB-backed web prototype: record-auth accounts with sign-up off by default, owner-scoped tables, encrypted provider tokens, and checksummed migrations
+- [x] One-way Google Contacts and iCloud vCard import paths that match on exact identifiers only, never overwrite, and report ambiguous cases
 - [x] Bounded, read-only Mesh snapshot tool
 - [x] ActiveGraph v0.1 domain pack and replay tests
 - [x] Apache-2.0 public documentation and synthetic-data policy
-- [ ] Publish from a sanitized, allowlisted Git history
+- [x] Publish from a sanitized, allowlisted Git history
 - [ ] Replace all personal operational evidence with synthetic fixtures
-- [ ] Establish branch protection, dependency review, secret scanning, and release checks
+- [x] Establish branch protection, dependency review, secret scanning, and release checks
+- [x] Beads issue tracker with a guarded, scanned public Dolt sync (see [AGENTS.md](AGENTS.md))
 
 ## Next — trustworthy persistence
 
 - [ ] Complete SurrealDB repository and schema review
 - [ ] Preserve exact source bytes and field-level provenance
 - [ ] Make manifest completion atomic and truthful
-- [ ] Prove deterministic replay across SQLite, Postgres, and SurrealDB adapters
-- [ ] Prove tenant isolation and restoration
-- [ ] Remove duplicate-creation races and partial-sync field loss
+- [ ] Prove deterministic replay across SQLite, Postgres, and SurrealDB adapters (`packages/activegraph-surrealdb/` passes upstream conformance; ContactKiller replay equivalence remains open)
+- [x] Tenant isolation tests at the database permission layer (`web/tests/`)
+- [ ] Restoration from backup in a clean environment
+- [x] Remove duplicate-creation races and partial-sync field loss in the web importers (unique provider links, fill-don't-overwrite, conflict-once)
 - [ ] Cut application reads to the canonical repository only after acceptance gates pass
 
 ## Then — read-only ecosystem
 
 - [ ] Formal provider-adapter SDK and contract tests
-- [ ] Google token refresh and incremental import
+- [x] Google access-token refresh from the stored refresh token (tested against a faked Google endpoint)
+- [ ] Live verification of Google refresh, and incremental import
 - [ ] CardDAV/iCloud read adapter
 - [ ] HubSpot read adapter
 - [ ] Lightfield read adapter

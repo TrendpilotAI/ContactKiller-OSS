@@ -50,6 +50,7 @@
     "activegraph-contactkiller/src/activegraph_contactkiller/models.py",
     "activegraph-contactkiller/src/activegraph_contactkiller/object_types.py",
     "activegraph-contactkiller/src/activegraph_contactkiller/runtime.py",
+    "activegraph-contactkiller/tests/conftest.py",
     "activegraph-contactkiller/tests/test_behaviors.py",
     "activegraph-contactkiller/tests/test_pack.py",
     "activegraph-contactkiller/tests/test_replay.py",

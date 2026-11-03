@@ -44,7 +44,7 @@ The repository is intentionally candid about maturity:
 | Google Contacts | Experimental | Read-only OAuth scope and one-way import with exact-identifier matching; access tokens refresh from the stored refresh token (not yet verified against live Google); write-back is not implemented. |
 | iCloud | Experimental | Manual vCard import under the same exact-match rules as Google (UID, email, valid phone); no CardDAV sync. |
 | Mesh | Research connector | Bounded, read-only snapshot path into owner-only local storage. |
-| ActiveGraph | Experimental foundation | Typed reconciliation objects, approval routing, replay, and runtime tests. Not the live production authority. |
+| ActiveGraph | Experimental foundation | Typed reconciliation objects, approval routing, replay, and runtime tests on SQLite or Postgres. Not the live production authority. An optional SurrealDB backend for it ships in `packages/activegraph-surrealdb/`. |
 | SurrealDB | Implemented prototype persistence | The web prototype stores users, contacts, conflicts, sync logs, and encrypted OAuth tokens in SurrealDB with owner-scoped permissions. The provenance, observation, and replay model remains a documented target. |
 | FalkorDB | Community extension | No ContactKiller adapter ships today; disposable projection and benchmark contributions are welcome. |
 | Provider mutations | Planned | The data model exists; no production-safe executor is available. |
@@ -94,8 +94,9 @@ docs/                        Public architecture, safety, and contributor guides
 examples/synthetic/          Synthetic contact fixtures and failure cases
 packages/activegraph-surrealdb/  Generic SurrealDB EventStore/GraphStore for ActiveGraph
 scripts/                     Read-only snapshots and disposable forensic tooling
-web/                         Next.js reconciliation prototype
+web/                         Next.js reconciliation prototype (SurrealDB)
 website/                     Public open-source launch site
+.beads/, AGENTS.md           Issue-tracker configuration and rules for maintainers and agents
 ```
 
 ## Quick start

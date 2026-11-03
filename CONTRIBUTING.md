@@ -30,11 +30,14 @@ If a bug requires sensitive evidence, follow [SECURITY.md](SECURITY.md) and shar
 The repository contains four independently testable surfaces:
 
 ```bash
-# Next.js reconciliation prototype
+# Next.js reconciliation prototype (needs a local SurrealDB: see docs/DEVELOPMENT.md)
 cd web
 cp .env.local.example .env.local
+cp compose.env.example compose.env   # then set a local root password
 bun install
 bun run lint
+bun run typecheck
+bun test        # needs a `surreal` binary on PATH or SURREAL_BIN
 bun run build
 
 # Public launch site
@@ -44,9 +47,10 @@ bun run lint
 bun run typecheck
 bun run build
 
-# Source snapshot and forensic-cache tooling
+# Source snapshot, forensic-cache, release-check and Beads tooling
 cd ..
-bun test scripts/*.test.ts
+bun test scripts/forensic-cache.test.ts scripts/mesh-mcp-snapshot.test.ts scripts/beads-scripts.test.ts scripts/check-public-release.test.ts
+# scripts/beads-guard.test.ts also needs bd, dolt and gitleaks; CI runs it in the Beads export scan workflow
 
 # ActiveGraph domain pack
 cd activegraph-contactkiller
@@ -57,6 +61,10 @@ pytest
 ```
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [docs/TESTING.md](docs/TESTING.md) for details.
+
+## Work tracking
+
+Maintainers and coding agents track durable work as `bd` (Beads) tickets and never publish tracker data except through `scripts/bd-push.sh`; the rules, provenance labels, and what the public scan checks are in [AGENTS.md](AGENTS.md). Ordinary contributors can use GitHub issues and pull requests as usual.
 
 ## Before opening a pull request
 

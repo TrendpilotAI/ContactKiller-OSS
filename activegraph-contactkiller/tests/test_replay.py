@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
+from activegraph import Graph, Runtime
+from activegraph.packs import PackSchemaViolation
+from activegraph.store import ConcurrentWriterError, open_store
+from activegraph_contactkiller import pack
 from activegraph_contactkiller.models import sha256_text
 from activegraph_contactkiller.runtime import (
     InconsistentRunStoreError,
@@ -12,6 +14,25 @@ from activegraph_contactkiller.runtime import (
     open_runtime,
     replay_runtime,
 )
+
+
+def _close(*runtimes: Runtime) -> None:
+    for runtime in runtimes:
+        runtime.graph.store.close()
+
+
+def _event_count(store_url: str, run_id: str) -> int:
+    store = open_store(store_url, run_id=run_id)
+    try:
+        return store.count()
+    finally:
+        store.close()
+
+
+def _person(runtime: Runtime, key: str):
+    return runtime.graph.add_object(
+        "person", {"person_key": key, "display_name": key}
+    )
 
 
 def _projection(
@@ -26,8 +47,8 @@ def _projection(
     return objects, relations
 
 
-def test_sqlite_event_log_replays_the_same_graph_projection(tmp_path) -> None:
-    store_url = f"sqlite:///{tmp_path / 'contactkiller-events.sqlite'}"
+def test_event_log_replays_the_same_graph_projection(event_store) -> None:
+    store_url = event_store.url
     runtime = create_runtime(store_url, run_id="run_replay")
     runtime.graph.add_object(
         "manifest",
@@ -49,10 +70,11 @@ def test_sqlite_event_log_replays_the_same_graph_projection(tmp_path) -> None:
 
     assert _projection(replayed) == expected
     assert any(event.type == "object.created" for event in replayed.graph.events)
+    _close(runtime, replayed)
 
 
-def test_identity_approval_survives_sqlite_replay_and_can_be_granted(tmp_path) -> None:
-    store_url = f"sqlite:///{tmp_path / 'pending-approval.sqlite'}"
+def test_identity_approval_survives_replay_and_can_be_granted(event_store) -> None:
+    store_url = event_store.url
     runtime = create_runtime(store_url, run_id="run_pending_replay")
     people = [
         runtime.graph.add_object(
@@ -98,18 +120,20 @@ def test_identity_approval_survives_sqlite_replay_and_can_be_granted(tmp_path) -
     assert resolution is not None
     assert resolution.type == "identity_resolution"
     assert replayed.pending_approvals() == []
+    _close(runtime, replayed)
 
 
-def test_create_runtime_fails_clearly_when_run_already_exists(tmp_path) -> None:
-    store_url = f"sqlite:///{tmp_path / 'create-only.sqlite'}"
-    create_runtime(store_url, run_id="canonical_contacts")
+def test_create_runtime_fails_clearly_when_run_already_exists(event_store) -> None:
+    store_url = event_store.url
+    runtime = create_runtime(store_url, run_id="canonical_contacts")
 
     with pytest.raises(RunAlreadyExistsError, match="use open_runtime"):
         create_runtime(store_url, run_id="canonical_contacts")
+    _close(runtime)
 
 
-def test_open_runtime_creates_then_replays_canonical_run(tmp_path) -> None:
-    store_url = f"sqlite:///{tmp_path / 'open-canonical.sqlite'}"
+def test_open_runtime_creates_then_replays_canonical_run(event_store) -> None:
+    store_url = event_store.url
     first = open_runtime(store_url, run_id="canonical_contacts")
     person = first.graph.add_object(
         "person",
@@ -123,22 +147,126 @@ def test_open_runtime_creates_then_replays_canonical_run(tmp_path) -> None:
     restored = reopened.graph.get_object(person.id)
     assert restored is not None
     assert restored.data["person_key"] == "canonical:sentinel"
+    _close(first, reopened)
 
 
-def test_replay_runtime_does_not_create_a_missing_run(tmp_path) -> None:
-    store_url = f"sqlite:///{tmp_path / 'replay-only.sqlite'}"
+def test_replay_runtime_does_not_create_a_missing_run(event_store) -> None:
+    store_url = event_store.url
 
     with pytest.raises(RunNotFoundError, match="use open_runtime"):
         replay_runtime(store_url, run_id="missing_contacts")
 
 
-def test_open_runtime_refuses_orphaned_events_instead_of_recreating(tmp_path) -> None:
-    store_path = tmp_path / "orphaned-events.sqlite"
-    store_url = f"sqlite:///{store_path}"
+def test_open_runtime_refuses_orphaned_events_instead_of_recreating(event_store) -> None:
+    store_url = event_store.url
     runtime = create_runtime(store_url, run_id="canonical_contacts")
     runtime.graph.store.close()
-    with sqlite3.connect(store_path) as connection:
-        connection.execute("DELETE FROM runs WHERE run_id = ?", ("canonical_contacts",))
+    event_store.delete_run_metadata("canonical_contacts")
 
     with pytest.raises(InconsistentRunStoreError, match="refusing to create"):
         open_runtime(store_url, run_id="canonical_contacts")
+
+
+def test_reopening_a_run_does_not_append_pack_loaded_events(event_store) -> None:
+    store_url = event_store.url
+    first = open_runtime(store_url, run_id="canonical_contacts")
+    _person(first, "canonical:reopen")
+    first.run_until_idle()
+    first.save_state()
+    _close(first)
+    recorded = _event_count(store_url, "canonical_contacts")
+
+    for reopen in (open_runtime, replay_runtime, open_runtime):
+        runtime = reopen(store_url, run_id="canonical_contacts")
+        assert [loaded.name for loaded in runtime.loaded_packs()] == ["contactkiller"]
+        assert len(runtime.graph.events) == recorded
+        _close(runtime)
+
+    assert _event_count(store_url, "canonical_contacts") == recorded
+    final = replay_runtime(store_url, run_id="canonical_contacts")
+    assert [event.type for event in final.graph.events].count("pack.loaded") == 1
+    _close(final)
+
+
+def test_reopened_run_keeps_pack_validation_and_behaviors_active(event_store) -> None:
+    store_url = event_store.url
+    first = open_runtime(store_url, run_id="canonical_contacts")
+    people = [_person(first, f"canonical:active:{index}") for index in range(2)]
+    first.run_until_idle()
+    first.save_state()
+    _close(first)
+
+    runtime = open_runtime(store_url, run_id="canonical_contacts")
+    with pytest.raises(PackSchemaViolation):
+        runtime.graph.add_object(
+            "source_record",
+            {
+                "source_record_key": "mesh:123",
+                "source_key": "mesh:example-workspace",
+                "external_id": "123",
+                "payload_uri": "file:///private/contactkiller/mesh/123.json",
+                "payload_sha256": "a" * 64,
+                "schema_version": "mesh-v2",
+                "observed_at": "2026-08-30T12:00:00Z",
+                "raw_payload": {"email": "must-not-enter-the-event-log@example.com"},
+            },
+        )
+
+    email = "reopen@example.com"
+    for index, person in enumerate(people):
+        runtime.graph.add_object(
+            "identity_observation",
+            {
+                "observation_key": f"reopen-email:{index}",
+                "source_record_key": f"reopen-source:{index}",
+                "person_id": person.id,
+                "kind": "email",
+                "normalized_value": email,
+                "value_sha256": sha256_text(email),
+                "observed_at": f"2026-08-30T15:0{index}:00Z",
+            },
+        )
+        runtime.run_until_idle()
+    assert len(runtime.pending_approvals()) == 1
+
+    numbers = [int(event.id.removeprefix("evt_")) for event in runtime.graph.events]
+    assert numbers == list(range(1, len(numbers) + 1))
+    _close(runtime)
+
+
+def test_second_open_of_a_run_does_not_fence_the_first_writer(event_store) -> None:
+    store_url = event_store.url
+    create_runtime(store_url, run_id="canonical_contacts").graph.store.close()
+
+    first = replay_runtime(store_url, run_id="canonical_contacts")
+    second = replay_runtime(store_url, run_id="canonical_contacts")
+    _person(first, "canonical:first-writer")
+
+    with pytest.raises(ConcurrentWriterError):
+        _person(second, "canonical:second-writer")
+    _close(first, second)
+
+    recorded = replay_runtime(store_url, run_id="canonical_contacts")
+    keys = [
+        item.data["person_key"]
+        for item in recorded.graph.all_objects()
+        if item.type == "person"
+    ]
+    assert keys == ["canonical:first-writer"]
+    _close(recorded)
+
+
+def test_pack_missing_from_the_log_is_recorded_once_on_replay(event_store) -> None:
+    store_url = event_store.url
+    store = open_store(store_url, run_id="packless_contacts")
+    store.upsert_run(created_at="2026-08-30T12:00:00+00:00")
+    runtime = Runtime(Graph(run_id="packless_contacts"), store=store)
+    _close(runtime)
+    assert _event_count(store_url, "packless_contacts") == 0
+
+    first = replay_runtime(store_url, run_id="packless_contacts")
+    assert [event.type for event in first.graph.events] == ["pack.loaded"]
+    _close(first)
+    second = replay_runtime(store_url, run_id="packless_contacts")
+    assert [event.type for event in second.graph.events] == ["pack.loaded"]
+    _close(second)

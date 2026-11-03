@@ -137,8 +137,19 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: activegraph-contactkiller/pyproject.toml
-      - run: python -m pip install -e '.[test]'
-      - run: python -m pytest
+      - run: python -m pip install -e '.[test,postgres]'
+      - name: Tests against SQLite
+        run: python -m pytest
+      - name: Start the runner's preinstalled PostgreSQL 16
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres createuser --superuser "$USER"
+          version=$(psql --dbname postgres --no-psqlrc --tuples-only --command "SHOW server_version" | xargs)
+          echo "PostgreSQL $version"
+          case "$version" in 16.*) ;; *) echo "expected PostgreSQL 16" >&2; exit 1 ;; esac
+          echo "CONTACTKILLER_TEST_POSTGRES_URL=postgresql://$USER@/postgres?host=/var/run/postgresql" >> "$GITHUB_ENV"
+      - name: Replay tests against PostgreSQL
+        run: python -m pytest
 
   surrealdb-activegraph:
     name: SurrealDB ActiveGraph adapter
