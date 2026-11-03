@@ -5,8 +5,11 @@ ContactKiller tests are organized around data integrity rather than line coverag
 ## Focused commands
 
 ```bash
-# TypeScript source tools
-bun test scripts/*.test.ts
+# TypeScript source tools (what the `Source tools` CI job runs)
+bun test scripts/forensic-cache.test.ts scripts/mesh-mcp-snapshot.test.ts scripts/beads-scripts.test.ts scripts/check-public-release.test.ts
+
+# Beads guard tests: need bd, dolt and gitleaks (run by the `Beads export scan` workflow)
+bun test scripts/beads-guard.test.ts
 
 # Web prototype (persistence tests need a `surreal` binary on PATH or SURREAL_BIN)
 cd web
@@ -77,4 +80,4 @@ All committed fixtures must be synthetic. A test that requires a real provider r
 
 ## What green CI does not prove
 
-CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.
+CI scans the public tracker data and the whole Git history for secrets and private identifiers, but a green scan is evidence, not proof. CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.

@@ -20,7 +20,7 @@ The web prototype (`web/`) is SurrealDB-only. It replaces the earlier hosted-Pos
 - numbered SurrealQL migrations with checksums, transactional apply, and rollback files; and
 - tests that run against a real in-memory SurrealDB server.
 
-These tables are mutable application state. Raw source payloads, content hashes, field-level provenance edges, append-only observations, ActiveGraph event storage, and graph projections are not implemented; non-public development work on those has not been reviewed for this repository.
+A separate package that would let ActiveGraph store its event log and graph projection in SurrealDB is proposed in [#16](https://github.com/TrendpilotAI/ContactKiller-OSS/pull/16); it is not merged, so ActiveGraph in this tree still runs on SQLite or Postgres. These tables are mutable application state. Raw source payloads, content hashes, field-level provenance edges, append-only observations, ActiveGraph event storage, and graph projections are not implemented; non-public development work on those has not been reviewed for this repository.
 
 ## Acceptance gates
 

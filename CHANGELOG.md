@@ -6,7 +6,14 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 
 ## [Unreleased]
 
+### Added
+
+- Beads issue tracking (`.beads/`, `AGENTS.md`, `CLAUDE.md`) with a guarded way to publish ticket data: `scripts/bd-push.sh` scans the whole tracker and its Dolt history before pushing, and the `Beads export scan` workflow re-scans the published data on pull requests, on `main`, and daily. The audit log is append-only and checked in CI.
+- `check-public-release.ts` gained a ticket-data scan mode and its own tests, and CI runs the Beads script tests alongside the existing source-tool tests.
+
 ### Changed
+
+- CI cancels superseded runs only for pull requests, not for pushes to `main`.
 
 - The web prototype now persists to SurrealDB. Accounts and sessions use SurrealDB record access, tenant isolation is enforced by owner-scoped table permissions, and provider OAuth tokens are encrypted by the application before storage. Supabase was removed; a `/login` screen was added because the prototype previously relied on an externally established session.
 - Replaced the Postgres migrations in `web/supabase/` with SurrealQL migrations in `web/surreal/migrations/` and a local SurrealDB `compose.yaml`.
