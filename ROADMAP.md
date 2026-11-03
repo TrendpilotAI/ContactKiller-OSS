@@ -21,7 +21,7 @@ ContactKiller is moving from a personal recovery prototype toward a safe, reusab
 - [ ] Complete SurrealDB repository and schema review
 - [ ] Preserve exact source bytes and field-level provenance
 - [ ] Make manifest completion atomic and truthful
-- [ ] Prove deterministic replay across SQLite, Postgres, and SurrealDB adapters (a SurrealDB backend for ActiveGraph is proposed in [#16](https://github.com/TrendpilotAI/ContactKiller-OSS/pull/16) and is not merged)
+- [ ] Prove deterministic replay across SQLite, Postgres, and SurrealDB adapters (`packages/activegraph-surrealdb/` passes upstream conformance; ContactKiller replay equivalence remains open)
 - [x] Tenant isolation tests at the database permission layer (`web/tests/`)
 - [ ] Restoration from backup in a clean environment
 - [x] Remove duplicate-creation races and partial-sync field loss in the web importers (unique provider links, fill-don't-overwrite, conflict-once)

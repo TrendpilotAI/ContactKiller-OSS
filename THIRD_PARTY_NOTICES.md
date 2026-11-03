@@ -24,8 +24,14 @@ License 1.1 terms. Review those terms before offering SurrealDB as a hosted
 service or redistributing it. The `surrealdb` JavaScript SDK is a separate
 Apache-2.0 dependency.
 
+The optional `activegraph-surrealdb` package depends on the `surrealdb` Python SDK,
+which its package metadata declares as Apache-2.0. Its prebuilt wheels include a
+native extension that provides the embedded `mem://` and `surrealkv://` engines;
+review the upstream terms for that engine before redistributing it.
+
 - Server license: <https://github.com/surrealdb/surrealdb/blob/main/LICENSE>
 - SDK license: <https://github.com/surrealdb/surrealdb.js/blob/main/LICENSE>
+- Python SDK license: <https://github.com/surrealdb/surrealdb.py/blob/main/LICENSE>
 
 ## FalkorDB
 

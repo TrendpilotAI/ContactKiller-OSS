@@ -11,6 +11,14 @@ The project intends to follow [Keep a Changelog](https://keepachangelog.com/en/1
 - Beads issue tracking (`.beads/`, `AGENTS.md`, `CLAUDE.md`) with a guarded way to publish ticket data: `scripts/bd-push.sh` scans the whole tracker and its Dolt history before pushing, and the `Beads export scan` workflow re-scans the published data on pull requests, on `main`, and daily. The audit log is append-only and checked in CI.
 - `check-public-release.ts` gained a ticket-data scan mode and its own tests, and CI runs the Beads script tests alongside the existing source-tool tests.
 - The ActiveGraph replay tests can run against PostgreSQL through `CONTACTKILLER_TEST_POSTGRES_URL`, and CI runs them against PostgreSQL 16 as well as SQLite.
+- `packages/activegraph-surrealdb`: an installable SurrealDB backend for ActiveGraph 1.12. It contains:
+  - `SurrealEventStore`, an EventStore with run metadata, snapshots and fork;
+  - `SurrealGraphStore`, a durable GraphStore projection;
+  - a shipped SurrealQL schema with an idempotent `apply_schema()`;
+  - `open_surreal_store()` for ws, wss, http, https, `mem://` and `surrealkv://` URLs.
+
+  Appends and truncation compare the run head inside a SurrealQL transaction and raise ActiveGraph's `ConcurrentWriterError` on a stale writer or a commit conflict. The upstream EventStore and GraphStore conformance suites pass unmodified. A new CI job runs them against a real SurrealDB server.
+- `.agents/skills/activegraph-surrealdb`: an agent skill for installing, configuring and testing the adapter.
 
 ### Changed
 

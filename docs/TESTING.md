@@ -34,6 +34,12 @@ pytest
 # Same replay tests against PostgreSQL (needs a role that can CREATE DATABASE)
 python -m pip install -e '.[test,postgres]'
 CONTACTKILLER_TEST_POSTGRES_URL='postgresql://postgres:<password>@localhost:5432/postgres' pytest
+
+# SurrealDB backend for ActiveGraph (embedded engines; set
+# ACTIVEGRAPH_SURREALDB_TEST_URL/_USER/_PASS to add a real server)
+cd ../packages/activegraph-surrealdb
+python -m pip install -e '.[test]'
+python -m pytest -rs
 ```
 
 ## Required test classes
