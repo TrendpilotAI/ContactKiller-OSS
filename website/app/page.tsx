@@ -66,7 +66,7 @@ const statusColumns = [
     label: "Available now",
     tone: "available",
     items: [
-      ["Contact explorer", "Supabase-backed prototype"],
+      ["Contact explorer", "SurrealDB-backed prototype"],
       ["Google Contacts", "Read-only one-way import"],
       ["iCloud", "Manual vCard import"],
       ["Mesh", "Bounded read-only research path"],

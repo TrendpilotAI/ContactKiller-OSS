@@ -8,10 +8,12 @@ ContactKiller tests are organized around data integrity rather than line coverag
 # TypeScript source tools
 bun test scripts/*.test.ts
 
-# Web prototype
+# Web prototype (persistence tests need a `surreal` binary on PATH or SURREAL_BIN)
 cd web
 bun install --frozen-lockfile
 bun run lint
+bun run typecheck
+bun test
 bun run build
 
 # Public launch site
@@ -48,6 +50,8 @@ pytest
 - no automatic merge from a name alone.
 
 ### Persistence and replay
+
+The web prototype's SurrealDB layer is covered by `web/tests/` against a real in-memory server: record auth and the database-side sign-up gate, owner-scoped permissions, exact-match importer rules, origin/content-type guards, token refresh, concurrent-sync, unique-link and conflict-once behavior, concurrent conflict resolution, iCloud/Google shared matching rules, sign-up responses that do not reveal registered addresses, bounded request bodies, GCM tag pinning, transactional writes, cascade deletes, migration checksums and rollback, ciphertext-only token storage, and importer idempotency. Append-only replay, restoration from backup, and concurrent-writer tests are still open.
 
 - append-only event behavior;
 - deterministic replay;

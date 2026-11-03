@@ -15,7 +15,11 @@ interface SyncResult {
   success: boolean
   imported?: number
   updated?: number
-  duplicates?: number
+  conflicts?: number
+  skipped?: string[]
+  sharedEmailContacts?: number
+  filledFields?: number
+  skippedCount?: number
   total?: number
   error?: string
 }
@@ -64,6 +68,10 @@ function SettingsContent() {
   async function checkGoogleStatus() {
     try {
       const res = await fetch('/api/sync/google')
+      if (res.status === 401) {
+        window.location.assign('/login?next=/settings')
+        return
+      }
       if (res.ok) {
         const data = await res.json()
         setGoogleStatus(data)
@@ -190,7 +198,7 @@ function SettingsContent() {
               <div className={`p-3 rounded-lg ${syncResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
                 {syncResult.success ? (
                   <p className="text-green-800 text-sm">
-                    Synced successfully! Imported: {syncResult.imported}, Updated: {syncResult.updated}
+                    Synced successfully! Imported: {syncResult.imported}, Updated: {syncResult.updated}, Conflicts to review: {syncResult.conflicts ?? 0}, Skipped as ambiguous: {syncResult.skipped?.length ?? 0}, Imported separately (shared email): {syncResult.sharedEmailContacts ?? 0}
                   </p>
                 ) : (
                   <p className="text-red-800 text-sm">{syncResult.error}</p>
@@ -230,8 +238,7 @@ function SettingsContent() {
               <div className={`p-3 rounded-lg ${importResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
                 {importResult.success ? (
                   <p className="text-green-800 text-sm">
-                    Imported {importResult.imported} of {importResult.total} contacts
-                    {importResult.duplicates ? ` (${importResult.duplicates} duplicates skipped)` : ''}
+                    {importResult.total} cards: {importResult.imported} new, {importResult.updated ?? 0} matched existing contacts (fields filled: {importResult.filledFields ?? 0}), {importResult.conflicts ?? 0} conflicts to review, {importResult.skippedCount ?? 0} skipped as ambiguous
                   </p>
                 ) : (
                   <p className="text-red-800 text-sm">{importResult.error}</p>

@@ -37,15 +37,15 @@ ContactKiller is designed around one boundary: source systems remain evidence, w
 
 ## Current default-branch implementation
 
-- The Next.js prototype uses Supabase for mutable contacts, source/account labels, OAuth configuration, and conflicts. It does not preserve exact raw source payloads or append-only observations for every import.
-- Google import can update an existing contact's mutable fields. iCloud import can treat a matching record as a duplicate and skip it. These paths are one-way prototype importers, not evidence-preserving reconciliation.
+- The Next.js prototype uses SurrealDB for accounts and sessions (record access), mutable contacts, source/account labels, encrypted OAuth tokens, sync logs, and conflicts. Owner-scoped table permissions enforce tenant isolation in the database. It does not preserve exact raw source payloads or append-only observations for every import.
+- Google and iCloud imports share one matching policy (`web/src/lib/sync/reconcile.ts`): a match on an exact identifier fills empty fields on the contact and files conflicts for differing values, without overwriting local values. These paths are one-way prototype importers, not evidence-preserving reconciliation.
 - The local DuckDB cache supports rebuildable research joins and summaries.
 - The ActiveGraph pack models manifests, observations, canonical identities, proposals, tasks, approvals, and events independently of the web application.
 - No production provider-mutation gateway exists.
 
 ## Target persistence boundary
 
-SurrealDB is being evaluated as the canonical multi-model store for:
+SurrealDB already persists the web prototype's mutable tables. It is also the intended canonical multi-model store for:
 
 - source manifests and exact payload evidence;
 - normalized records and account ownership;
@@ -65,7 +65,7 @@ A graph projection is disposable. It must be reproducible from the event history
 
 ## Target invariants
 
-These are acceptance gates for the canonical system, not guarantees of the current Supabase prototype.
+These are acceptance gates for the canonical system, not guarantees of the current web prototype.
 
 1. A source observation is never silently rewritten by normalization.
 2. Account ownership is explicit on every source record.

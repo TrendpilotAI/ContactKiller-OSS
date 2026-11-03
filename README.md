@@ -2,7 +2,7 @@
 
 **Kill contact chaos. Keep every relationship.**
 
-ContactKiller is an experimental, open-source contact-reconciliation project for people whose address books have become accidental CRMs. The public tree combines a working Supabase prototype, read-only local research tools, and an experimental ActiveGraph domain pack. Its target architecture preserves source evidence, proposes conservative identity matches, and keeps risky provider changes behind explicit human approval; the current web importer does not yet deliver those guarantees end to end.
+ContactKiller is an experimental, open-source contact-reconciliation project for people whose address books have become accidental CRMs. The public tree combines a working SurrealDB-backed prototype, read-only local research tools, and an experimental ActiveGraph domain pack. Its target architecture preserves source evidence, proposes conservative identity matches, and keeps risky provider changes behind explicit human approval; the current web importer does not yet deliver those guarantees end to end.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-3B82F6.svg)](LICENSE)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-E5482D.svg)](ROADMAP.md)
@@ -30,7 +30,7 @@ Conventional sync chooses a winner and overwrites the rest. ContactKiller's targ
 | --- | --- |
 | Evidence before mutation | The DuckDB forensic tool records manifests and observations, and the ActiveGraph pack models source evidence. The web prototype still writes mutable contacts directly and does not retain every raw provider observation. |
 | Conservative identity | ActiveGraph proposes exact normalized email or E.164 matches. A complete identity engine is not connected to the web prototype. |
-| Replayable decisions | The ActiveGraph pack includes event lifecycle and replay tests. The Supabase prototype is not yet a projection of that history. |
+| Replayable decisions | The ActiveGraph pack includes event lifecycle and replay tests. The SurrealDB-backed prototype is not yet a projection of that history. |
 | Approval at the boundary | Approval and mutation-plan objects are modeled. No production provider-write executor ships. |
 | Account isolation | The prototype records provider links and ContactKiller tenant ownership, but cannot distinguish two accounts from the same provider for one user. Multi-account provenance and full tenant-isolation proof remain acceptance gates. |
 
@@ -40,12 +40,12 @@ The repository is intentionally candid about maturity:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Contact explorer and CRUD API | Implemented prototype | Supabase-backed interface and routes; not production-proven. |
-| Google Contacts | Experimental | Read-only OAuth scope and one-way import; token refresh and write-back are incomplete. |
-| iCloud | Experimental | Manual vCard import; no CardDAV sync. |
+| Contact explorer and CRUD API | Implemented prototype | SurrealDB-backed interface and routes; not production-proven. |
+| Google Contacts | Experimental | Read-only OAuth scope and one-way import with exact-identifier matching; access tokens refresh from the stored refresh token (not yet verified against live Google); write-back is not implemented. |
+| iCloud | Experimental | Manual vCard import under the same exact-match rules as Google (UID, email, valid phone); no CardDAV sync. |
 | Mesh | Research connector | Bounded, read-only snapshot path into owner-only local storage. |
 | ActiveGraph | Experimental foundation | Typed reconciliation objects, approval routing, replay, and runtime tests. Not the live production authority. |
-| SurrealDB | Active development | The persistence contract is documented, but no SurrealDB adapter ships in the sanitized default branch. |
+| SurrealDB | Implemented prototype persistence | The web prototype stores users, contacts, conflicts, sync logs, and encrypted OAuth tokens in SurrealDB with owner-scoped permissions. The provenance, observation, and replay model remains a documented target. |
 | FalkorDB | Community extension | No ContactKiller adapter ships today; disposable projection and benchmark contributions are welcome. |
 | Provider mutations | Planned | The data model exists; no production-safe executor is available. |
 
@@ -76,11 +76,11 @@ Apple / Google / CRM / Mesh / messaging evidence
                          bounded provider mutation
 ```
 
-The public tree does not implement this flow end to end. Today, Google import can update mutable contact fields and iCloud import can skip a duplicate rather than retain a separate source observation. The diagram is an architecture contract and acceptance target, not a production-readiness claim.
+The public tree does not implement this flow end to end. Today, Google and iCloud imports fill empty fields on an exactly matched contact and file conflicts for differences, rather than retaining a separate source observation. The diagram is an architecture contract and acceptance target, not a production-readiness claim.
 
 The target architecture separates three responsibilities:
 
-- **SurrealDB** is the experimental target for a canonical persistence boundary covering evidence, records, operations, and graph relations.
+- **SurrealDB** persists the web prototype today (mutable contacts, accounts, conflicts, encrypted provider tokens) and is the target for a canonical boundary covering evidence, records, operations, and graph relations.
 - **ActiveGraph** supplies typed behavior, tasks, approval routing, event history, replay, and fork/diff experiments.
 - **FalkorDB** is a potential disposable projection seam for community experiments—not a second source of truth.
 
@@ -105,20 +105,24 @@ website/                     Public open-source launch site
 - Node.js 20.9 or newer
 - Python 3.11 or newer for the ActiveGraph pack
 - [DuckDB CLI](https://duckdb.org/docs/stable/clients/cli/overview.html) 1.5.5 or newer for the forensic-cache tool and its integration tests
-- A development Supabase project or local Supabase stack for the web prototype
+- [Docker](https://docs.docker.com/get-docker/) (or a SurrealDB 3.x server) for the web prototype's local database
 
 ### Web prototype
 
 ```bash
 cd web
-cp .env.local.example .env.local
+cp .env.local.example .env.local      # placeholders only; set your own encryption key
+cp compose.env.example compose.env    # then set a local SurrealDB root password
 bun install
+docker compose --env-file compose.env up -d --wait   # SurrealDB on 127.0.0.1:8000
+# For the first account only: set CONTACTKILLER_ALLOW_SIGNUP=true in .env.local
+bun run db:migrate                                   # apply migrations, sync the sign-up switch
 bun run dev
 ```
 
-This is a build-and-UI quick start. The example environment file contains placeholders only. To exercise persistence, apply `web/supabase/migrations/001_initial_schema.sql` and then `002_security_and_oauth.sql` to a disposable development Supabase project. To exercise Google import, create a development OAuth web client and register `http://localhost:3000/api/auth/google/callback` (or the matching `NEXT_PUBLIC_APP_URL`) as its redirect URI.
+Open <http://localhost:3000/login>, create a local account, and import a synthetic vCard from **Settings**. `.env.local` needs `CONTACTKILLER_TOKEN_ENCRYPTION_KEY`; generate one with `openssl rand -base64 32`. To exercise Google import, create a development OAuth web client and register `http://localhost:3000/api/auth/google/callback` (or the matching `NEXT_PUBLIC_APP_URL`) as its redirect URI.
 
-The prototype does not ship a login screen, so authenticated provider routes require a separately established Supabase session. Use synthetic fixtures and a development tenant; do not reuse production credentials or personal contact exports.
+Sign-up is off by default and is enforced inside SurrealDB, not only in the app: the database's sign-up clause refuses to run unless `setting:signup` is on, and `bun run db:migrate` sets it from `CONTACTKILLER_ALLOW_SIGNUP`. To create the first user, set the variable to `true`, run `bun run db:migrate`, restart the dev server, sign up on `/login`, then set it back to `false` and run `bun run db:migrate` again. Accounts, sessions, and row-level ownership are likewise enforced by SurrealDB itself; the web app never holds database root credentials. Use synthetic fixtures and a development database; do not reuse production credentials or personal contact exports, and never expose the SurrealDB port beyond loopback. See [Development](docs/DEVELOPMENT.md) for tests and troubleshooting.
 
 ### ActiveGraph pack
 

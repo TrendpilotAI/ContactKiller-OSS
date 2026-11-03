@@ -1,11 +1,10 @@
 import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
-import { createClient } from '@/lib/supabase/server'
-import { randomBytes } from 'crypto'
+import { getEncryptionKey } from '@/lib/db/crypto'
+import { openSession } from '@/lib/db/session'
+import { createOAuthState, OAUTH_STATE_TTL_MS } from '@/lib/oauth-state'
 
 // Google OAuth configuration
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!
-const GOOGLE_REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`
 const SCOPES = [
   'https://www.googleapis.com/auth/contacts.readonly',
   'https://www.googleapis.com/auth/userinfo.email',
@@ -13,40 +12,33 @@ const SCOPES = [
 
 // GET /api/auth/google - Initiates Google OAuth flow
 export async function GET(): Promise<NextResponse> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const session = await openSession()
 
   // Require authentication
-  if (!user) {
-    return NextResponse.redirect(new URL('/login', process.env.NEXT_PUBLIC_APP_URL!))
+  if (!session) {
+    return NextResponse.redirect(new URL('/login?next=/settings', process.env.NEXT_PUBLIC_APP_URL!))
   }
+  const userId = String(session.userId.id)
+  await session.close()
 
-  // Generate simple random state (no HMAC needed - stored in httpOnly cookie)
-  const state = randomBytes(32).toString('hex')
+  // The state is signed for the user who is starting the flow, so only that
+  // account can finish it (see completeGoogleCallback). The cookie keeps the
+  // flow bound to this browser as well.
+  const state = createOAuthState(getEncryptionKey(), userId)
 
-  // Store state in httpOnly cookie for CSRF protection
   const cookieStore = await cookies()
   cookieStore.set('google_oauth_state', state, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
-    maxAge: 600, // 10 minutes
-    path: '/',
-  })
-
-  // Store user ID in cookie so callback knows who initiated the flow
-  cookieStore.set('google_oauth_user', user.id, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 600,
+    maxAge: OAUTH_STATE_TTL_MS / 1000,
     path: '/',
   })
 
   // Build Google OAuth URL
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-  authUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID)
-  authUrl.searchParams.set('redirect_uri', GOOGLE_REDIRECT_URI)
+  authUrl.searchParams.set('client_id', process.env.GOOGLE_CLIENT_ID!)
+  authUrl.searchParams.set('redirect_uri', `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`)
   authUrl.searchParams.set('response_type', 'code')
   authUrl.searchParams.set('scope', SCOPES)
   authUrl.searchParams.set('access_type', 'offline')

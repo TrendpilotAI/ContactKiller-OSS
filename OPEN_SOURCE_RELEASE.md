@@ -37,9 +37,9 @@ This file is the public-release gate and evidence ledger. A checked documentatio
 
 These checks require the sanitized root to exist on the new remote. They do not block creating the empty public repository or making the first root push.
 
-- [ ] Default branch CI passes from a clean checkout
-- [ ] Dependency review and secret scanning are enabled
-- [ ] Branch protection requires review and CI
+- [x] Default branch CI passes from a clean checkout
+- [x] Dependency review and secret scanning are enabled
+- [x] Branch protection requires review and CI
 
 ## Publication gate
 
@@ -48,8 +48,8 @@ The private repository's current history contains personal operational material.
 - [x] Choose a new root-history repository (`TrendpilotAI/ContactKiller-OSS`)
 - [x] Review the exact public tree and object list
 - [x] Create and scan the sanitized local root commit
-- [ ] Create the empty public repository after the local root-history gates pass
-- [ ] Push only the sanitized root history and verify the public object graph
-- [ ] Verify hosted CI and repository protections
+- [x] Create the empty public repository after the local root-history gates pass
+- [x] Push only the sanitized root history and verify the public object graph
+- [x] Verify hosted CI and repository protections
 
 A signed version tag and GitHub release may be created after the public object graph, hosted CI, and repository protections are verified. They are release evidence, not a prerequisite for creating the empty remote.
