@@ -80,4 +80,4 @@ All committed fixtures must be synthetic. A test that requires a real provider r
 
 ## What green CI does not prove
 
-CI scans the public tracker data and the whole Git history for secrets and private identifiers, but a green scan is evidence, not proof. CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.
+CI scans the whole Git history with Gitleaks for secrets, and checks current tracked files plus the public Beads tracker export (and Dolt history after the trusted baseline) for project-specific private identifiers; a green scan is evidence, not proof. CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.
