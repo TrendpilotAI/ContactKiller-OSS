@@ -45,6 +45,7 @@ DEFINE FIELD IF NOT EXISTS payload ON ag_event TYPE string;
 DEFINE FIELD IF NOT EXISTS frame_id ON ag_event TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS caused_by ON ag_event TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS timestamp ON ag_event TYPE string;
+DEFINE FIELD IF NOT EXISTS appended_at ON ag_event TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS ag_event_run_seq ON ag_event FIELDS run_id, seq UNIQUE;
 DEFINE INDEX IF NOT EXISTS ag_event_run_event_id ON ag_event FIELDS run_id, event_id UNIQUE;
 

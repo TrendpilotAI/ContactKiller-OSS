@@ -61,30 +61,44 @@ IF $head.head_seq != $expected_head OR ($head.last_seq ?? 0) != $expected_last {
 _APPEND = f"""
 BEGIN TRANSACTION;
 {_HEAD_CHECK}
-CREATE ag_event CONTENT $event;
+LET $now = time::now();
+CREATE ag_event CONTENT {{
+    run_id: $event.run_id,
+    seq: $event.seq,
+    event_id: $event.event_id,
+    type: $event.type,
+    actor: $event.actor,
+    payload: $event.payload,
+    frame_id: $event.frame_id,
+    caused_by: $event.caused_by,
+    timestamp: $event.timestamp,
+    appended_at: $now
+}};
 UPSERT $head_record SET
     run_id = $run_id,
     head_seq = $event.seq,
     last_seq = $event.seq,
     event_count = $expected_count + 1,
-    appended_at = time::now();
+    appended_at = $now;
 COMMIT TRANSACTION;
 """
 
 _TRUNCATE = f"""
 BEGIN TRANSACTION;
 {_HEAD_CHECK}
-LET $cut = (SELECT VALUE seq FROM ag_event WHERE run_id = $run_id AND event_id = $event_id)[0];
-IF $cut = NONE {{
+LET $cut_row = (SELECT seq, appended_at FROM ag_event WHERE run_id = $run_id AND event_id = $event_id LIMIT 1)[0];
+IF $cut_row = NONE {{
     THROW "{EVENT_MISSING}";
 }};
+LET $cut = $cut_row.seq;
 DELETE ag_event WHERE run_id = $run_id AND seq > $cut;
 LET $remaining = (SELECT count() AS n FROM ag_event WHERE run_id = $run_id GROUP ALL)[0].n ?? 0;
 UPSERT $head_record SET
     run_id = $run_id,
     head_seq = $cut,
     last_seq = $expected_last,
-    event_count = $remaining;
+    event_count = $remaining,
+    appended_at = $cut_row.appended_at ?? appended_at;
 RETURN {{ ag_truncate: true, head_seq: $cut, event_count: $remaining }};
 COMMIT TRANSACTION;
 """
@@ -123,7 +137,8 @@ FOR $row IN $rows {{
         payload: $row.payload,
         frame_id: $row.frame_id,
         caused_by: $row.caused_by,
-        timestamp: $row.timestamp
+        timestamp: $row.timestamp,
+        appended_at: $row.appended_at ?? time::now()
     }};
 }};
 CREATE $new_head_record CONTENT {{
@@ -394,10 +409,10 @@ class SurrealEventStore:
     @classmethod
     def most_recent_run_id(cls, target: Any, namespace: Optional[str] = None,
                            database: Optional[str] = None, **auth: Any) -> Optional[str]:
-        """The registered run with the highest retained ``head_seq`` (tie-broken
-        by ``appended_at`` and ``created_at``); runs without events follow,
-        newest ``created_at`` first (matching the ActiveGraph 1.13 reference
-        stores, without running schema DDL on an uninitialized database)."""
+        """The registered run appended to most recently (by the retained head's
+        ``appended_at``, tie-broken by ``created_at``); runs without events
+        follow, newest ``created_at`` first (without running schema DDL on an
+        uninitialized database)."""
         with _scoped(target, namespace, database, auth, ensure_schema=False) as conn:
             info = conn.query("INFO FOR DB;")[0]
             tables = set((info.get("tables") if isinstance(info, dict) else None) or ())
@@ -410,19 +425,16 @@ class SurrealEventStore:
                 return max(runs, key=lambda r: r["created_at"])["run_id"]
             runs, heads = conn.query(
                 "SELECT run_id, created_at FROM ag_run;"
-                "SELECT run_id, head_seq, appended_at FROM ag_run_head WHERE event_count > 0;"
+                "SELECT run_id, appended_at FROM ag_run_head WHERE event_count > 0;"
             )
-        head_by_run = {
-            row["run_id"]: (int(row.get("head_seq") or 0), str(row.get("appended_at") or ""))
-            for row in heads
-        }
+        appended = {row["run_id"]: row.get("appended_at") for row in heads}
         if not runs:
             return None
-        with_events = [r for r in runs if r["run_id"] in head_by_run]
+        with_events = [r for r in runs if appended.get(r["run_id"]) is not None]
         if with_events:
             return max(
                 with_events,
-                key=lambda r: (*head_by_run[r["run_id"]], str(r.get("created_at") or "")),
+                key=lambda r: (appended[r["run_id"]], str(r.get("created_at") or "")),
             )["run_id"]
         return max(runs, key=lambda r: r["created_at"])["run_id"]
 

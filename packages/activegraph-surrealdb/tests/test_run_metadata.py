@@ -64,21 +64,27 @@ def test_catalog_status_is_read_only_and_detects_orphans(session: Session) -> No
     assert SurrealEventStore.catalog_status(session.client, "run_cat") == (True, 1)
 
 
-def test_most_recent_run_id_uses_retained_head_seq_after_truncation(session: Session) -> None:
-    r1 = session.event_store("run_seq_1")
-    r2 = session.event_store("run_seq_2")
-    r1.upsert_run(created_at="2026-01-01T00:00:00Z")
-    r2.upsert_run(created_at="2026-01-02T00:00:00Z")
-    r1.append(make_event("evt_1"))
-    r2.append(make_event("evt_1"))
-    r2.append(make_event("evt_2"))
-    r1.append(make_event("evt_2"))
-    r1.append(make_event("evt_3"))
-    assert SurrealEventStore.most_recent_run_id(session.client) == "run_seq_1"
+def test_most_recent_run_id_orders_chronologically_across_unequal_lengths_and_truncation(
+    session: Session,
+) -> None:
+    longer_older = session.event_store("run_longer_older")
+    shorter_newer = session.event_store("run_shorter_newer")
+    longer_older.upsert_run(created_at="2026-01-01T00:00:00Z")
+    shorter_newer.upsert_run(created_at="2026-01-02T00:00:00Z")
 
-    # Truncating r1 back to seq 1 leaves r2 (head_seq 2) with the highest retained head.
-    r1.truncate_after("evt_1")
-    assert SurrealEventStore.most_recent_run_id(session.client) == "run_seq_2"
+    for i in range(5):
+        longer_older.append(make_event(f"evt_long_{i}"))
+    # A newer run with fewer events (head_seq=1 vs head_seq=5) still wins because
+    # its latest event was appended more recently.
+    shorter_newer.append(make_event("evt_short_0"))
+    assert SurrealEventStore.most_recent_run_id(session.client) == "run_shorter_newer"
+
+    # Appending to longer_older makes it most recent, and truncating that tail
+    # restores the earlier appended_at so shorter_newer becomes most recent again.
+    longer_older.append(make_event("evt_long_5"))
+    assert SurrealEventStore.most_recent_run_id(session.client) == "run_longer_older"
+    longer_older.truncate_after("evt_long_4")
+    assert SurrealEventStore.most_recent_run_id(session.client) == "run_shorter_newer"
 
 
 def test_fork_run_requires_registered_parent_and_preserves_seq_after_truncate(session: Session) -> None:
