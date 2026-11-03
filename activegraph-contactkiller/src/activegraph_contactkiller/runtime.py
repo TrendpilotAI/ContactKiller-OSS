@@ -10,6 +10,8 @@ are runtime configuration and must never be copied into an event payload.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from activegraph import Graph, Runtime
@@ -87,8 +89,61 @@ def replay_runtime(event_store_url: str, *, run_id: str) -> Runtime:
 
 def _replay_existing(event_store_url: str, *, run_id: str) -> Runtime:
     runtime = Runtime.load(event_store_url, run_id=run_id)
-    runtime.load_pack(pack)
+    _register_pack(runtime)
     return runtime
+
+
+def _register_pack(runtime: Runtime) -> None:
+    """Install the pack's behaviors and validators on a replayed runtime.
+
+    ``Runtime.load`` replays events but cannot reconstruct pack code, and
+    ``load_pack`` always appends a ``pack.loaded`` event. When the log already
+    records this pack and version, that event would only grow the log on every
+    boot and advance the run head, making a second process that opens the same
+    run fail with ``ConcurrentWriterError`` before it has written anything. A
+    pack that is missing from the log, or recorded at another version, is still
+    loaded normally so the change is auditable.
+    """
+
+    if not _log_records_pack(runtime):
+        runtime.load_pack(pack)
+        return
+    with _without_pack_loaded_events(runtime.graph):
+        runtime.load_pack(pack)
+
+
+def _log_records_pack(runtime: Runtime) -> bool:
+    return any(
+        event.type == "pack.loaded"
+        and event.payload.get("name") == pack.name
+        and event.payload.get("version") == pack.version
+        for event in runtime.graph.events
+    )
+
+
+@contextmanager
+def _without_pack_loaded_events(graph: Graph) -> Iterator[None]:
+    """Drop the ``pack.loaded`` event ``load_pack`` emits, without a log gap.
+
+    ``load_pack`` draws an event id before emitting. ``IDGen`` counters only move
+    forward, so the draw is stubbed as well; otherwise every reopen would burn
+    one event id and leave a hole in the log's numbering.
+    """
+
+    emit = graph.emit
+
+    def emit_unless_pack_loaded(event):
+        if event.type == "pack.loaded":
+            return None
+        return emit(event)
+
+    graph.emit = emit_unless_pack_loaded
+    graph.ids.event = lambda: "evt_suppressed_pack_loaded"
+    try:
+        yield
+    finally:
+        del graph.emit
+        del graph.ids.event
 
 
 def _create_with_open_store(store, *, run_id: str) -> Runtime:

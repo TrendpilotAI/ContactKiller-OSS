@@ -30,6 +30,10 @@ bun run build
 cd ../activegraph-contactkiller
 python -m pip install -e '.[test]'
 pytest
+
+# Same replay tests against PostgreSQL (needs a role that can CREATE DATABASE)
+python -m pip install -e '.[test,postgres]'
+CONTACTKILLER_TEST_POSTGRES_URL='postgresql://postgres:<password>@localhost:5432/postgres' pytest
 ```
 
 ## Required test classes
