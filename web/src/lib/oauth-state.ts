@@ -48,5 +48,9 @@ export function verifyOAuthState(
 
   const given = Buffer.from(mac, 'base64url')
   const expected = sign(secret, nonce, issuedAt, userId)
-  return given.length === expected.length && timingSafeEqual(given, expected)
+  return (
+    given.length === expected.length &&
+    timingSafeEqual(given, expected) &&
+    given.toString('base64url') === mac
+  )
 }

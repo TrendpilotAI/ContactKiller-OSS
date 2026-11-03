@@ -7,6 +7,7 @@
 - Python 3.11+ for the ActiveGraph pack
 - DuckDB CLI 1.5.5+ for the local forensic-cache tool and its integration tests
 - Docker (or a SurrealDB 3.x server binary) for the web prototype's database
+- Optional: `bd` 1.3.1, `dolt` and gitleaks 8.30.x, only for Beads tracker work and its guard tests (see `AGENTS.md`)
 
 ## Clean setup
 

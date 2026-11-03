@@ -1,0 +1,4 @@
+interface:
+  display_name: "ActiveGraph SurrealDB"
+  short_description: "Store ActiveGraph events and projections in SurrealDB"
+  default_prompt: "Use $activegraph-surrealdb to install, configure, or test the SurrealDB backend for ActiveGraph."

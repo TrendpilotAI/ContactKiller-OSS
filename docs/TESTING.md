@@ -5,8 +5,11 @@ ContactKiller tests are organized around data integrity rather than line coverag
 ## Focused commands
 
 ```bash
-# TypeScript source tools
-bun test scripts/*.test.ts
+# TypeScript source tools (what the `Source tools` CI job runs)
+bun test scripts/forensic-cache.test.ts scripts/mesh-mcp-snapshot.test.ts scripts/beads-scripts.test.ts scripts/check-public-release.test.ts
+
+# Beads guard tests: need bd, dolt and gitleaks (run by the `Beads export scan` workflow)
+bun test scripts/beads-guard.test.ts
 
 # Web prototype (persistence tests need a `surreal` binary on PATH or SURREAL_BIN)
 cd web
@@ -27,6 +30,16 @@ bun run build
 cd ../activegraph-contactkiller
 python -m pip install -e '.[test]'
 pytest
+
+# Same replay tests against PostgreSQL (needs a role that can CREATE DATABASE)
+python -m pip install -e '.[test,postgres]'
+CONTACTKILLER_TEST_POSTGRES_URL='postgresql://postgres:<password>@localhost:5432/postgres' pytest
+
+# SurrealDB backend for ActiveGraph (embedded engines; set
+# ACTIVEGRAPH_SURREALDB_TEST_URL/_USER/_PASS to add a real server)
+cd ../packages/activegraph-surrealdb
+python -m pip install -e '.[test]'
+python -m pytest -rs
 ```
 
 ## Required test classes
@@ -77,4 +90,4 @@ All committed fixtures must be synthetic. A test that requires a real provider r
 
 ## What green CI does not prove
 
-CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.
+CI scans the whole Git history with Gitleaks for secrets, and checks current tracked files plus the public Beads tracker export (and Dolt history after the trusted baseline) for project-specific private identifiers; a green scan is evidence, not proof. CI does not prove production OAuth, provider rate limits, real-device contact visibility, restoration, deployment provenance, or the safety of a bulk cleanup. Name the exact scope of every verification claim.
