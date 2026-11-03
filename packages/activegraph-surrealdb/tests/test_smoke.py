@@ -108,3 +108,48 @@ def test_iteration_pages_through_long_logs(target: Target) -> None:
             list(store.iter_events(after="evt_missing"))
     finally:
         session.close()
+
+
+@pytest.mark.skipif(SERVER.skip_reason is not None, reason=SERVER.skip_reason or "")
+@pytest.mark.parametrize("auth_scope", ["namespace", "database"])
+def test_scoped_user_authentication_against_server(auth_scope: str) -> None:
+    session = SERVER.session()
+    try:
+        level = "NAMESPACE" if auth_scope == "namespace" else "DATABASE"
+        user = f"scoped_{auth_scope}_user"
+        password = "scoped-test-password-123"
+        session.client.query_raw(f"DEFINE USER {user} ON {level} PASSWORD '{password}' ROLES OWNER;", {})
+        url = f"surrealdb+{session.url}?ns={session.namespace}&db={session.database}"
+        store = open_surreal_store(
+            url,
+            f"run_{auth_scope}",
+            username=user,
+            password=password,
+            auth_scope=auth_scope,
+        )
+        projection = SurrealGraphStore(
+            session.url,
+            session.namespace,
+            session.database,
+            graph_id=f"proj_{auth_scope}",
+            username=user,
+            password=password,
+            auth_scope=auth_scope,
+        )
+        try:
+            apply_schema(
+                session.url,
+                namespace=session.namespace,
+                database=session.database,
+                username=user,
+                password=password,
+                auth_scope=auth_scope,
+            )
+            store.append(make_event("evt_scoped_1"))
+            assert [e.id for e in store.iter_events()] == ["evt_scoped_1"]
+            assert projection.all_objects() == []
+        finally:
+            projection.close()
+            store.close()
+    finally:
+        session.close()

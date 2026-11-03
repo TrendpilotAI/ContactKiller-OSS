@@ -30,6 +30,7 @@ def apply_schema(
     database: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    auth_scope: str = "root",
 ) -> None:
     """Define the ActiveGraph tables if missing and check the schema version.
 
@@ -42,7 +43,7 @@ def apply_schema(
         _apply(target)
         return
     connection = Connection(
-        target, namespace=namespace, database=database, username=username, password=password
+        target, namespace=namespace, database=database, username=username, password=password, auth_scope=auth_scope
     )
     try:
         _apply(connection)

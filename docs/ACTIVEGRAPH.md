@@ -21,7 +21,7 @@
 - a shipped SurrealQL schema and an idempotent `apply_schema()`; and
 - `open_surreal_store(url, run_id)` for `ws://`, `wss://`, `http://`, `https://`, `mem://`, and `surrealkv://` URLs.
 
-ActiveGraph 1.12 has no store registry, so `open_store()` and `Runtime.load()` cannot open these URLs. Pass the store to `Runtime(graph, store=...)` instead.
+ActiveGraph 1.13 has no store registry, so `open_store()` and `Runtime.load()` cannot open these URLs. Pass the store to `Runtime(graph, store=...)` instead.
 
 The package passes ActiveGraph's `EventStoreConformance` and `GraphStoreConformance` suites unmodified, against a SurrealDB 3.3 server and the embedded engines. Its own tests cover append-before-project ordering, `ConcurrentWriterError` for every writer race, and `PATCH_OPS` enforcement on replay. CI runs all of these against a real server.
 

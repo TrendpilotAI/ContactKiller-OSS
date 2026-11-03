@@ -1,6 +1,6 @@
 # activegraph-surrealdb
 
-A SurrealDB backend for [ActiveGraph](https://github.com/yoheinakajima/activegraph) 1.12:
+A SurrealDB backend for [ActiveGraph](https://github.com/yoheinakajima/activegraph) 1.13:
 
 - `SurrealEventStore` implements ActiveGraph's `EventStore` protocol (`append`,
   `iter_events`, `get_event`, `count`, `truncate_after`, `close`). It also has the
@@ -23,7 +23,7 @@ python -m pip install -e packages/activegraph-surrealdb          # from this rep
 python -m pip install -e 'packages/activegraph-surrealdb[test]'  # with the test suite
 ```
 
-The package pins `activegraph==1.12.0` and `surrealdb==2.0.0` (the Python SDK). The
+The package pins `activegraph==1.13.0` and `surrealdb==2.0.0` (the Python SDK). The
 SDK wheel includes the embedded engines. A server is only needed for `ws://`,
 `wss://`, `http://`, and `https://`.
 
@@ -50,6 +50,7 @@ from activegraph_surrealdb import SurrealEventStore, SurrealGraphStore
 store = SurrealEventStore(
     "ws://127.0.0.1:8000/rpc", "app", "events", run_id="run_1",
     username="app_user", password=password_from_your_secret_store,
+    auth_scope="database",  # "root" (default), "namespace", or "database"
 )
 graph = Graph(run_id="run_1")                    # in-memory projection, or:
 # graph = Graph(run_id="run_1", graph_store=SurrealGraphStore(client, graph_id="run_1"))
@@ -64,7 +65,7 @@ required, because every `mem://` connection is a separate empty database.
 
 ### URL forms
 
-`open_surreal_store(url, run_id, *, namespace=None, database=None, username=None, password=None)`
+`open_surreal_store(url, run_id, *, namespace=None, database=None, username=None, password=None, auth_scope='root')`
 opens a store from a URL. These forms are accepted:
 
 | URL | Engine |
@@ -81,7 +82,7 @@ accepted as long names). Keyword arguments override the URL parameters. Credenti
 are keyword-only. A URL with `user:pass@` is refused, so secrets do not end up in
 logs.
 
-ActiveGraph 1.12's `open_store()` and `Runtime.load()` only dispatch `sqlite` and
+ActiveGraph 1.13's `open_store()` and `Runtime.load()` only dispatch `sqlite` and
 `postgres` URLs, and ActiveGraph has no store registry or entry point to extend
 them. So a SurrealDB store is passed to `Runtime(graph, store=...)` directly. To
 resume a run, replay its log into a fresh graph:

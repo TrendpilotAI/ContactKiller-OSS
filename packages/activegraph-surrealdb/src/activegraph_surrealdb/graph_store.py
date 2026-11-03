@@ -48,13 +48,14 @@ class SurrealGraphStore(GraphStore):
         graph_id: str = "default",
         username: Optional[str] = None,
         password: Optional[str] = None,
+        auth_scope: str = "root",
         ensure_schema: bool = True,
     ) -> None:
         if not graph_id:
             raise ValueError("graph_id must be a non-empty string")
         self.graph_id = graph_id
         self._conn = Connection(
-            target, namespace=namespace, database=database, username=username, password=password
+            target, namespace=namespace, database=database, username=username, password=password, auth_scope=auth_scope
         )
         try:
             if ensure_schema:

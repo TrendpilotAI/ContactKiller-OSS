@@ -1,6 +1,6 @@
 """SurrealDB backend for ActiveGraph: an EventStore and a GraphStore.
 
-``SurrealEventStore`` implements the ActiveGraph 1.12 ``EventStore`` protocol
+``SurrealEventStore`` implements the ActiveGraph 1.13 ``EventStore`` protocol
 (plus the run-metadata, snapshot and fork helpers the reference stores
 expose); ``SurrealGraphStore`` implements the ``GraphStore`` ABC. Both pass
 the upstream conformance suites.

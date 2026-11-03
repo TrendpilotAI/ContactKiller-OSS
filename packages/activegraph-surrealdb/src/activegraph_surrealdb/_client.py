@@ -27,6 +27,7 @@ URL_PREFIX = "surrealdb+"
 
 _NAMESPACE_KEYS = ("namespace", "ns")
 _DATABASE_KEYS = ("database", "db")
+_AUTH_SCOPES = ("root", "namespace", "database")
 
 # Placeholder entries SurrealDB attaches to the statements of a failed
 # transaction; they are never the root cause. Servers tag them with a detail
@@ -185,6 +186,7 @@ class Connection:
         database: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
+        auth_scope: str = "root",
     ) -> None:
         self.owned = isinstance(target, str)
         self.url: Optional[SurrealURL] = None
@@ -203,8 +205,12 @@ class Connection:
             self.client = target
         self.closed = False
         try:
-            if username is not None or password is not None:
-                self.client.signin({"username": username, "password": password})
+            if auth_scope not in _AUTH_SCOPES:
+                raise _config_error(
+                    f"unsupported SurrealDB auth_scope {auth_scope!r}",
+                    url=None,
+                    how_to_fix="Use auth_scope='root', 'namespace', or 'database'.",
+                )
             if namespace is not None or database is not None:
                 if not namespace or not database:
                     raise _config_error(
@@ -212,13 +218,39 @@ class Connection:
                         url=None,
                         how_to_fix="Pass both namespace= and database= (or ns and db URL parameters).",
                     )
-                self.client.use(namespace, database)
             elif self.owned:
                 raise _config_error(
                     "no namespace or database selected",
                     url=None,
                     how_to_fix="Pass namespace= and database= (or ns and db URL parameters).",
                 )
+            if username is not None or password is not None:
+                if not username or password is None:
+                    raise _config_error(
+                        "username and password must be given together",
+                        url=None,
+                        how_to_fix="Pass both username= and password= when authenticating.",
+                    )
+                credentials: dict[str, Any] = {"username": username, "password": password}
+                if auth_scope in ("namespace", "database"):
+                    if not namespace:
+                        raise _config_error(
+                            f"auth_scope={auth_scope!r} requires a namespace",
+                            url=None,
+                            how_to_fix="Pass namespace= and database= when using a scoped user.",
+                        )
+                    credentials["namespace"] = namespace
+                if auth_scope == "database":
+                    if not database:
+                        raise _config_error(
+                            "auth_scope='database' requires a database",
+                            url=None,
+                            how_to_fix="Pass namespace= and database= when using a database user.",
+                        )
+                    credentials["database"] = database
+                self.client.signin(credentials)
+            if namespace is not None and database is not None:
+                self.client.use(namespace, database)
         except BaseException:
             self.close()
             raise

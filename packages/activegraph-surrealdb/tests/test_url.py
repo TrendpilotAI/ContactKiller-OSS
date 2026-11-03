@@ -12,7 +12,7 @@ from activegraph_surrealdb import (
     SurrealQueryError,
     parse_surreal_url,
 )
-from activegraph_surrealdb._client import _redact_url, results_or_raise
+from activegraph_surrealdb._client import Connection, _redact_url, results_or_raise
 
 
 @pytest.mark.parametrize(
@@ -135,3 +135,55 @@ def test_commit_conflict_is_the_root_cause() -> None:
     with pytest.raises(SurrealQueryError) as caught:
         results_or_raise(response)
     assert caught.value.kind == "TransactionConflict"
+
+
+class _DummyClient:
+    def __init__(self) -> None:
+        self.signed_in: list[dict[str, object]] = []
+        self.used: list[tuple[str, str]] = []
+        self.closed = False
+
+    def query_raw(self, surql: str, variables: dict[str, object]) -> dict[str, object]:
+        return {"result": []}
+
+    def signin(self, credentials: dict[str, object]) -> str:
+        self.signed_in.append(credentials)
+        return "token"
+
+    def use(self, namespace: str, database: str) -> None:
+        self.used.append((namespace, database))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("auth_scope", "expected"),
+    [
+        ("root", {"username": "u", "password": "p"}),
+        ("namespace", {"username": "u", "password": "p", "namespace": "ns"}),
+        ("database", {"username": "u", "password": "p", "namespace": "ns", "database": "db"}),
+    ],
+)
+def test_connection_auth_scope_payloads(auth_scope: str, expected: dict[str, object]) -> None:
+    dummy = _DummyClient()
+    conn = Connection(dummy, namespace="ns", database="db", username="u", password="p", auth_scope=auth_scope)
+    assert dummy.signed_in == [expected]
+    assert dummy.used == [("ns", "db")]
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"namespace": "ns", "database": "db", "username": "u", "password": "p", "auth_scope": "invalid"},
+        {"username": "u", "password": "p", "auth_scope": "namespace"},
+        {"username": "u", "password": "p", "auth_scope": "database"},
+        {"namespace": "ns", "database": "db", "username": "u"},
+        {"namespace": "ns", "database": "db", "password": "p"},
+    ],
+)
+def test_connection_auth_scope_validation(kwargs: dict[str, object]) -> None:
+    dummy = _DummyClient()
+    with pytest.raises(SurrealConfigurationError):
+        Connection(dummy, **kwargs)  # type: ignore[arg-type]

@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Database",
 ]
 dependencies = [
-  "activegraph==1.12.0",
+  "activegraph==1.13.0",
   "surrealdb==2.0.0",
 ]
 

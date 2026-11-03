@@ -174,6 +174,7 @@ class SurrealEventStore:
         *,
         username: Optional[str] = None,
         password: Optional[str] = None,
+        auth_scope: str = "root",
         ensure_schema: bool = True,
         page_size: int = 1000,
     ) -> None:
@@ -187,7 +188,7 @@ class SurrealEventStore:
         self.run_id = run_id
         self._page_size = page_size
         self._conn = Connection(
-            target, namespace=namespace, database=database, username=username, password=password
+            target, namespace=namespace, database=database, username=username, password=password, auth_scope=auth_scope
         )
         try:
             if ensure_schema:
@@ -497,10 +498,11 @@ def open_surreal_store(
     database: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    auth_scope: str = "root",
 ) -> SurrealEventStore:
     """Open a :class:`SurrealEventStore` from a URL.
 
-    ActiveGraph 1.12's ``open_store`` only dispatches ``sqlite`` and
+    ActiveGraph 1.13's ``open_store`` only dispatches ``sqlite`` and
     ``postgres`` URLs and has no plug-in registry, so this is the URL entry
     point for SurrealDB. Accepted forms::
 
@@ -520,6 +522,7 @@ def open_surreal_store(
         run_id=run_id,
         username=username,
         password=password,
+        auth_scope=auth_scope,
     )
 
 
@@ -528,7 +531,7 @@ class _scoped:
 
     def __init__(self, target: Any, namespace: Optional[str], database: Optional[str],
                  auth: dict[str, Any]) -> None:
-        unknown = set(auth) - {"username", "password"}
+        unknown = set(auth) - {"username", "password", "auth_scope"}
         if unknown:
             raise TypeError(f"unexpected keyword arguments: {sorted(unknown)}")
         self._conn = Connection(target, namespace=namespace, database=database, **auth)

@@ -7,7 +7,7 @@ description: Use when an ActiveGraph application should keep its event log or gr
 
 `packages/activegraph-surrealdb` (import `activegraph_surrealdb`) provides two stores:
 
-- `SurrealEventStore`, an ActiveGraph 1.12 `EventStore`;
+- `SurrealEventStore`, an ActiveGraph 1.13 `EventStore`;
 - `SurrealGraphStore`, a `GraphStore` projection.
 
 Both pass ActiveGraph's upstream conformance suites unmodified. The package README is the reference; this skill is the short path.
@@ -28,7 +28,7 @@ python3.11 -m venv .venv && . .venv/bin/activate
 python -m pip install -e '.[test]'
 ```
 
-The package pins `activegraph==1.12.0` and `surrealdb==2.0.0`. The embedded `mem://` and `surrealkv://` engines come with the SDK wheel; no server is needed for them.
+The package pins `activegraph==1.13.0` and `surrealdb==2.0.0`. The embedded `mem://` and `surrealkv://` engines come with the SDK wheel; no server is needed for them.
 
 ## Run SurrealDB
 
@@ -84,7 +84,7 @@ Never edit, skip, or override upstream conformance test methods to get a green r
 
 ## Pitfalls
 
-- `open_store()` and `Runtime.load()` in ActiveGraph 1.12 only open `sqlite` and `postgres` URLs. Pass the store to `Runtime(graph, store=...)`; to resume, follow the replay pattern in the README.
+- `open_store()` and `Runtime.load()` in ActiveGraph 1.13 only open `sqlite` and `postgres` URLs. Pass the store to `Runtime(graph, store=...)`; to resume, follow the replay pattern in the README.
 - `ConcurrentWriterError` means another handle moved the run head. Do not catch it and retry on the same handle; close it, reload the run, and keep one writer per run.
 - `DuplicateEventError` means the event id already exists in that run. Use ActiveGraph's id generator.
 - `truncate_after` deletes the tail for good; there is no archive tier.
