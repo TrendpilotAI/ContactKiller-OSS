@@ -25,6 +25,8 @@ This file is the public-release gate and evidence ledger. A checked documentatio
 - [x] Generated artifacts and local databases are absent from the release tree
 - [x] Public package contents are reviewed with an exact allowlist and reviewed-binary digests
 - [x] Every public fixture is synthetic
+- [x] Public issue-tracker data is scanned for private identifiers and secrets before it can be published, and again in CI (Beads export scan)
+- [x] The public-release check rejects Supabase client, environment, and endpoint references
 
 ## Local engineering gates
 
